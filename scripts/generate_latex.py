@@ -298,5 +298,12 @@ def main():
     generate_tex(out_tex, variables, equations, stabilization)
     print(f"LaTeX source written to {out_tex}")
 
+    # Also write to Overleaf directory
+    overleaf_dir = os.path.join(base_dir, 'overleaf')
+    if os.path.exists(overleaf_dir):
+        out_overleaf = os.path.join(overleaf_dir, 'model_equations.tex')
+        generate_tex(out_overleaf, variables, equations, stabilization)
+        print(f"LaTeX source also written to {out_overleaf}")
+
 if __name__ == "__main__":
     main()

@@ -1,134 +1,90 @@
-% Model Equations Auto-Generated
-\section{Upper Level Problem (ULP)}
 
-\subsection{Variables}
-\begin{itemize}
-    \item \( \Q\_offer \geq 0 \quad \forall  \in [R] \)
-    \item \( \\tau_{imp} \geq 0 \quad \forall  \in [imp, exp] \)
-    \item \( \\tau_{exp} \geq 0 \quad \forall  \in [exp, imp] \)
-\end{itemize}
+\begin{align*}
+\textbf{Sets:}\quad & r,i,e \in R \\
+\\
+\textbf{Parameters:}\quad
+& a_i>0,\; b_i>0 && \text{Inverse demand in } i:\; P_i(x_i)=a_i-b_i x_i \\
+& D^{max}_i>0 && \text{Demand/installation cap in } i \\
+& c^{man}_r && \text{Manufacturing cost in } r \\
+& c^{ship}_{r i} && \text{Shipping cost from } r \text{ to } i \\
+& Q^{cap}_r && \text{Existing capacity in } r \\
+& \overline{\tau}^{imp}_{i r}\ge 0 && \text{Upper bound on import tariff } (i\text{ on }r) \\
+& \overline{\tau}^{exp}_{r i}\ge 0 && \text{Upper bound on export tax } (r\text{ to }i) \\
+& \rho^{imp}_r,\rho^{exp}_r\ge 0 && \textbf{Linear penalty weights} \\
+& \kappa_r \ge 0 && \text{Linear penalty on offered capacity } Q^{offer}_r \\
+& w_r\ge 0 && \text{Weight on consumer surplus in welfare objective} \\
+& \varepsilon_x \ge 0 && \text{Flow regularization parameter} \\
+& \varepsilon_{comp}\ge 0 && \text{Complementarity relaxation tolerance} \\
+\\
+\textbf{Strategic (ULP) variables:}\quad
+& Q^{offer}_r \in [0,Q^{cap}_r] && \text{Offered capacity in } r \\
+& \tau^{imp}_{i r}\in[0,\overline{\tau}^{imp}_{i r}] && \text{Import tariff set by } i \text{ on } r \\
+& \tau^{exp}_{r i}\in[0,\overline{\tau}^{exp}_{r i}] && \text{Export tax set by } r \text{ on } i \\
+& \tau^{imp}_{ii}=0,\; \tau^{exp}_{ii}=0 && \forall i \\
+\\
+\textbf{LLP primal variables:}\quad
+& x_{r i}\ge 0 && \text{Shipment } r\to i \\
+& x^{dem}_i \in [0,D^{max}_i] && \text{Consumption in } i \\
+\\
+\textbf{LLP dual variables:}\quad
+& \lambda_i\in\mathbb{R} && \text{Dual of node balance in } i \\
+& \mu_r\ge 0 && \text{Dual of exporter capacity in } r \\
+& \gamma_{r i}\ge 0 && \text{Dual of } x_{r i}\ge 0 \\
+& \beta_i\ge 0 && \text{Dual of } x^{dem}_i\le D^{max}_i \\
+& \psi_i\ge 0 && \text{Dual of } x^{dem}_i\ge 0 \\
+\\
+\textbf{Implemented price bounds (numerical stabilization):}\quad
+& 0 \le \lambda_i \le a_i && \forall i
+\end{align*}
 
-\subsection{Objectives}
-\subsubsection*{Objective (Welfare)}
-\begin{equation}
-    w_{r} \cdot  cons\_surplus + imp\_tariff\_rev + exp\_tax\_rev + producer\_term + pen\_imp\_quad + pen\_exp\_quad + pen\_q\_quad
-\end{equation}
+\begin{align*}
+\textbf{Utility:}\quad
+& U_i(x)=a_i x^{dem}_i-\tfrac{1}{2}b_i (x^{dem}_i)^2 \\
+\textbf{Delivered wedge:}\quad
+& k_{r i} := c^{man}_r + c^{ship}_{r i} + \tau^{exp}_{r i} + \tau^{imp}_{i r}
+\end{align*}
 
-\subsubsection*{Objective (Welfare)}
-\begin{equation}
-    w_{r} \cdot  cons\_surplus + imp\_tariff\_rev + exp\_tax\_rev + producer\_term + pen\_imp\_lin + pen\_exp\_lin + pen\_q\_lin
-\end{equation}
+\begin{align*}
+\textbf{LLP (system clearing):}\qquad
+\min_{x,\;x^{dem}}\;\;
+& \sum_{r,i\in R} \left(c^{man}_r + c^{ship}_{r i} + \tau^{exp}_{r i} + \tau^{imp}_{i r}\right)x_{r i}
++ \frac{\varepsilon_x}{2}\sum_{r,i\in R} x_{r i}^2
+- \sum_{i\in R}\left(a_i x^{dem}_i-\tfrac{1}{2}b_i (x^{dem}_i)^2\right) \\
+\text{s.t.}\qquad
+& \sum_{r\in R} x_{r i} - x^{dem}_i = 0 \quad (\lambda_i) && \forall i\in R \\
+& Q^{offer}_r - \sum_{i\in R} x_{r i} \ge 0 \quad (\mu_r) && \forall r\in R \\
+& x_{r i}\ge 0 \quad (\gamma_{r i}) && \forall r,i\in R \\
+& D^{max}_i - x^{dem}_i \ge 0 \quad (\beta_i) && \forall i\in R \\
+& x^{dem}_i \ge 0 \quad (\psi_i) && \forall i\in R
+\end{align*}
 
+\begin{align*}
+\textbf{Stationarity (KKT):}\qquad
+& k_{r i} + \varepsilon_x x_{r i} - \lambda_i + \mu_r - \gamma_{r i} = 0 && \forall r,i\in R \\
+& -(a_i-b_i x^{dem}_i) + \lambda_i + \beta_i - \psi_i = 0 && \forall i\in R
+\end{align*}
 
-\section{Lower Level Problem (LLP)}
+\begin{align*}
+\textbf{Complementarity (relaxed):}\qquad
+& \mu_r \cdot \left(Q^{offer}_r-\sum_{i\in R}x_{r i}\right) \le \varepsilon_{comp} && \forall r\in R \\
+& \gamma_{r i}\cdot x_{r i} \le \varepsilon_{comp} && \forall r,i\in R \\
+& \beta_i\cdot (D^{max}_i-x^{dem}_i) \le \varepsilon_{comp} && \forall i\in R \\
+& \psi_i\cdot x^{dem}_i \le \varepsilon_{comp} && \forall i\in R
+\end{align*}
 
-\subsection{Variables}
-\begin{itemize}
-    \item \( \x \geq 0 \quad \forall  \in [exp, imp] \)
-    \item \( \x\_dem \geq 0 \quad \forall  \in [R] \)
-    \item \( \\mu \geq 0 \quad \forall  \in [R] \)
-    \item \( \\gamma \geq 0 \quad \forall  \in [exp, imp] \)
-    \item \( \\beta_{dem} \geq 0 \quad \forall  \in [R] \)
-    \item \( \\psi_{dem} \geq 0 \quad \forall  \in [R] \)
-\end{itemize}
-
-\subsection{Equations}
-\subsubsection*{eq obj llp (, \forall Ellipsis)}
-\begin{equation}
-    z_{LLP} = llp\_total\_cost - llp\_gross\_surplus
-\end{equation}
-
-\subsubsection*{eq bal (, \forall imp)}
-\begin{equation}
-    \sum_{exp} (x_{exp,imp}) - x\_dem_{imp} = 0
-\end{equation}
-
-\subsubsection*{eq cap (, \forall exp)}
-\begin{equation}
-    Q\_offer_{exp} - \sum_{imp} (x_{exp,imp}) \geq 0
-\end{equation}
-
-\subsubsection*{eq stat x (, \forall exp, imp)}
-\begin{equation}
-    c\_man_{exp} + c\_ship_{exp,imp} + \tau_{exp}_{exp,imp} + \tau_{imp}_{imp,exp} + \eps_{x} \cdot  x_{exp,imp} - \lam_{imp} + \mu_{exp} - \gamma_{exp,imp} = 0
-\end{equation}
-
-\subsubsection*{eq stat dem (, \forall imp)}
-\begin{equation}
-    -a\_dem_{imp} - b\_dem_{imp} \cdot  x\_dem_{imp} + \lam_{imp} + \beta_{dem}_{imp} - \psi_{dem}_{imp} = 0
-\end{equation}
-
-\subsubsection*{eq comp mu (, \forall exp)}
-\begin{equation}
-    \mu_{exp} \cdot  (Q\_offer_{exp} - \sum_{imp} (x_{exp,imp})) = 0
-\end{equation}
-
-\subsubsection*{eq comp mu (, \forall exp)}
-\begin{equation}
-    \mu_{exp} \cdot  (Q\_offer_{exp} - \sum_{imp} (x_{exp,imp})) \leq \eps_{value}
-\end{equation}
-
-\subsubsection*{eq comp gamma (, \forall exp, imp)}
-\begin{equation}
-    \gamma_{exp,imp} \cdot  x_{exp,imp} = 0
-\end{equation}
-
-\subsubsection*{eq comp gamma (, \forall exp, imp)}
-\begin{equation}
-    \gamma_{exp,imp} \cdot  x_{exp,imp} \leq \eps_{value}
-\end{equation}
-
-\subsubsection*{eq comp beta dem (, \forall imp)}
-\begin{equation}
-    \beta_{dem}_{imp} \cdot  (Dmax_{imp} - x\_dem_{imp}) = 0
-\end{equation}
-
-\subsubsection*{eq comp beta dem (, \forall imp)}
-\begin{equation}
-    \beta_{dem}_{imp} \cdot  (Dmax_{imp} - x\_dem_{imp}) \leq \eps_{value}
-\end{equation}
-
-\subsubsection*{eq comp psi dem (, \forall imp)}
-\begin{equation}
-    \psi_{dem}_{imp} \cdot  x\_dem_{imp} = 0
-\end{equation}
-
-\subsubsection*{eq comp psi dem (, \forall imp)}
-\begin{equation}
-    \psi_{dem}_{imp} \cdot  x\_dem_{imp} \leq \eps_{value}
-\end{equation}
-
-
-\section{Numerical Stabilization}
-The following penalty terms are used in the ULP objective or LLP regularization:
-
-\subsubsection*{pen imp quad}
-\begin{equation}
-    -0.5 \cdot  \rho_{imp}_{r} \cdot  \sum_{j} (\tau_{imp}_{r,j} \cdot  \tau_{imp}_{r,j})
-\end{equation}
-
-\subsubsection*{pen exp quad}
-\begin{equation}
-    -0.5 \cdot  \rho_{exp}_{r} \cdot  \sum_{j} (\tau_{exp}_{r,j} \cdot  \tau_{exp}_{r,j})
-\end{equation}
-
-\subsubsection*{pen q quad}
-\begin{equation}
-    -0.5 \cdot  kappa\_Q_{r} \cdot  Q\_offer_{r} \cdot  Q\_offer_{r}
-\end{equation}
-
-\subsubsection*{pen imp lin}
-\begin{equation}
-    -\rho_{imp}_{r} \cdot  \sum_{j} (\tau_{imp}_{r,j})
-\end{equation}
-
-\subsubsection*{pen exp lin}
-\begin{equation}
-    -\rho_{exp}_{r} \cdot  \sum_{j} (\tau_{exp}_{r,j})
-\end{equation}
-
-\subsubsection*{pen q lin}
-\begin{equation}
-    -kappa\_Q_{r} \cdot  Q\_offer_{r}
-\end{equation}
-
+\begin{align*}
+\textbf{ULP (welfare player } r\textbf{):}\qquad
+\max_{Q^{offer}_r,\;\tau^{imp}_{r\cdot},\;\tau^{exp}_{r\cdot}}\;\;
+& w_r \left[ \left(a_r x^{dem}_r-\tfrac{1}{2}b_r (x^{dem}_r)^2\right) - \lambda_r x^{dem}_r \right] \\
+& + \sum_{j\in R} \tau^{imp}_{r j}\, x_{j r} + \sum_{j\in R} \tau^{exp}_{r j}\, x_{r j} \\
+& + \sum_{j\in R}\left(\lambda_j - c^{man}_r - c^{ship}_{r j} - \tau^{imp}_{j r}\right)x_{r j} \\
+& -\rho^{imp}_r\sum_{e\in R}\tau^{imp}_{r e}
+  -\rho^{exp}_r\sum_{i\in R}\tau^{exp}_{r i}
+  -\kappa_r Q^{offer}_r \\
+\text{s.t.}\qquad
+& 0\le Q^{offer}_r \le Q^{cap}_r \\
+& 0\le \tau^{imp}_{r e}\le \overline{\tau}^{imp}_{r e} \\
+& 0\le \tau^{exp}_{r i}\le \overline{\tau}^{exp}_{r i} \\
+& \text{LLP KKT conditions hold.}
+\end{align*}
+    

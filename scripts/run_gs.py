@@ -181,3 +181,15 @@ if __name__ == "__main__":
 
     write_default_plots(output_path=output_path, plots_dir=plots_dir)
     print(f"[OK] wrote: {output_path}")
+
+    # --- Run LaTeX Generation Workflow ---
+    try:
+        # Ensure we can import generate_latex from the same directory
+        sys.path.append(os.path.dirname(__file__))
+        import generate_latex
+        print("Running automatic LaTeX documentation generation...")
+        generate_latex.main()
+    except ImportError:
+        print("[WARN] Could not import generate_latex.py. Skipping LaTeX generation.")
+    except Exception as e:
+        print(f"[WARN] Error during LaTeX generation: {e}")

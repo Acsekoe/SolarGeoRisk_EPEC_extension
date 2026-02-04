@@ -1,0 +1,134 @@
+% Model Equations Auto-Generated
+\section{Upper Level Problem (ULP)}
+
+\subsection{Variables}
+\begin{itemize}
+    \item \( \Q\_offer \geq 0 \quad \forall  \in [R] \)
+    \item \( \\tau_{imp} \geq 0 \quad \forall  \in [imp, exp] \)
+    \item \( \\tau_{exp} \geq 0 \quad \forall  \in [exp, imp] \)
+\end{itemize}
+
+\subsection{Objectives}
+\subsubsection*{Objective (Welfare)}
+\begin{equation}
+    w_{r} \cdot  cons\_surplus + imp\_tariff\_rev + exp\_tax\_rev + producer\_term + pen\_imp\_quad + pen\_exp\_quad + pen\_q\_quad
+\end{equation}
+
+\subsubsection*{Objective (Welfare)}
+\begin{equation}
+    w_{r} \cdot  cons\_surplus + imp\_tariff\_rev + exp\_tax\_rev + producer\_term + pen\_imp\_lin + pen\_exp\_lin + pen\_q\_lin
+\end{equation}
+
+
+\section{Lower Level Problem (LLP)}
+
+\subsection{Variables}
+\begin{itemize}
+    \item \( \x \geq 0 \quad \forall  \in [exp, imp] \)
+    \item \( \x\_dem \geq 0 \quad \forall  \in [R] \)
+    \item \( \\mu \geq 0 \quad \forall  \in [R] \)
+    \item \( \\gamma \geq 0 \quad \forall  \in [exp, imp] \)
+    \item \( \\beta_{dem} \geq 0 \quad \forall  \in [R] \)
+    \item \( \\psi_{dem} \geq 0 \quad \forall  \in [R] \)
+\end{itemize}
+
+\subsection{Equations}
+\subsubsection*{eq obj llp (, \forall Ellipsis)}
+\begin{equation}
+    z_{LLP} = llp\_total\_cost - llp\_gross\_surplus
+\end{equation}
+
+\subsubsection*{eq bal (, \forall imp)}
+\begin{equation}
+    \sum_{exp} (x_{exp,imp}) - x\_dem_{imp} = 0
+\end{equation}
+
+\subsubsection*{eq cap (, \forall exp)}
+\begin{equation}
+    Q\_offer_{exp} - \sum_{imp} (x_{exp,imp}) \geq 0
+\end{equation}
+
+\subsubsection*{eq stat x (, \forall exp, imp)}
+\begin{equation}
+    c\_man_{exp} + c\_ship_{exp,imp} + \tau_{exp}_{exp,imp} + \tau_{imp}_{imp,exp} + \eps_{x} \cdot  x_{exp,imp} - \lam_{imp} + \mu_{exp} - \gamma_{exp,imp} = 0
+\end{equation}
+
+\subsubsection*{eq stat dem (, \forall imp)}
+\begin{equation}
+    -a\_dem_{imp} - b\_dem_{imp} \cdot  x\_dem_{imp} + \lam_{imp} + \beta_{dem}_{imp} - \psi_{dem}_{imp} = 0
+\end{equation}
+
+\subsubsection*{eq comp mu (, \forall exp)}
+\begin{equation}
+    \mu_{exp} \cdot  (Q\_offer_{exp} - \sum_{imp} (x_{exp,imp})) = 0
+\end{equation}
+
+\subsubsection*{eq comp mu (, \forall exp)}
+\begin{equation}
+    \mu_{exp} \cdot  (Q\_offer_{exp} - \sum_{imp} (x_{exp,imp})) \leq \eps_{value}
+\end{equation}
+
+\subsubsection*{eq comp gamma (, \forall exp, imp)}
+\begin{equation}
+    \gamma_{exp,imp} \cdot  x_{exp,imp} = 0
+\end{equation}
+
+\subsubsection*{eq comp gamma (, \forall exp, imp)}
+\begin{equation}
+    \gamma_{exp,imp} \cdot  x_{exp,imp} \leq \eps_{value}
+\end{equation}
+
+\subsubsection*{eq comp beta dem (, \forall imp)}
+\begin{equation}
+    \beta_{dem}_{imp} \cdot  (Dmax_{imp} - x\_dem_{imp}) = 0
+\end{equation}
+
+\subsubsection*{eq comp beta dem (, \forall imp)}
+\begin{equation}
+    \beta_{dem}_{imp} \cdot  (Dmax_{imp} - x\_dem_{imp}) \leq \eps_{value}
+\end{equation}
+
+\subsubsection*{eq comp psi dem (, \forall imp)}
+\begin{equation}
+    \psi_{dem}_{imp} \cdot  x\_dem_{imp} = 0
+\end{equation}
+
+\subsubsection*{eq comp psi dem (, \forall imp)}
+\begin{equation}
+    \psi_{dem}_{imp} \cdot  x\_dem_{imp} \leq \eps_{value}
+\end{equation}
+
+
+\section{Numerical Stabilization}
+The following penalty terms are used in the ULP objective or LLP regularization:
+
+\subsubsection*{pen imp quad}
+\begin{equation}
+    -0.5 \cdot  \rho_{imp}_{r} \cdot  \sum_{j} (\tau_{imp}_{r,j} \cdot  \tau_{imp}_{r,j})
+\end{equation}
+
+\subsubsection*{pen exp quad}
+\begin{equation}
+    -0.5 \cdot  \rho_{exp}_{r} \cdot  \sum_{j} (\tau_{exp}_{r,j} \cdot  \tau_{exp}_{r,j})
+\end{equation}
+
+\subsubsection*{pen q quad}
+\begin{equation}
+    -0.5 \cdot  kappa\_Q_{r} \cdot  Q\_offer_{r} \cdot  Q\_offer_{r}
+\end{equation}
+
+\subsubsection*{pen imp lin}
+\begin{equation}
+    -\rho_{imp}_{r} \cdot  \sum_{j} (\tau_{imp}_{r,j})
+\end{equation}
+
+\subsubsection*{pen exp lin}
+\begin{equation}
+    -\rho_{exp}_{r} \cdot  \sum_{j} (\tau_{exp}_{r,j})
+\end{equation}
+
+\subsubsection*{pen q lin}
+\begin{equation}
+    -kappa\_Q_{r} \cdot  Q\_offer_{r}
+\end{equation}
+

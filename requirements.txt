@@ -1,0 +1,6 @@
+gamspy
+pandas
+openpyxl
+matplotlib
+numpy
+

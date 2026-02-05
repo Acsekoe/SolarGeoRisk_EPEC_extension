@@ -301,94 +301,190 @@ def get_static_content():
     # but for now we assume the model structure is fixed as per `model.py`.
     
     TEMPLATE = r"""
-\begin{align*}
-\textbf{Sets:}\quad & r,i,e \in R \\
-\\
-\textbf{Parameters:}\quad
-& a_i>0,\; b_i>0 && \text{Inverse demand in } i:\; P_i(x_i)=a_i-b_i x_i \\
-& D^{max}_i>0 && \text{Demand/installation cap in } i \\
-& c^{man}_r && \text{Manufacturing cost in } r \\
-& c^{ship}_{r i} && \text{Shipping cost from } r \text{ to } i \\
-& Q^{cap}_r && \text{Existing capacity in } r \\
-& \overline{\tau}^{imp}_{i r}\ge 0 && \text{Upper bound on import tariff } (i\text{ on }r) \\
-& \overline{\tau}^{exp}_{r i}\ge 0 && \text{Upper bound on export tax } (r\text{ to }i) \\
-& \rho^{imp}_r,\rho^{exp}_r\ge 0 && \textbf{Linear penalty weights} \\
-& \kappa_r \ge 0 && \text{Linear penalty on offered capacity } Q^{offer}_r \\
-& w_r\ge 0 && \text{Weight on consumer surplus in welfare objective} \\
-& \varepsilon_x \ge 0 && \text{Flow regularization parameter} \\
-& \varepsilon_{comp}\ge 0 && \text{Complementarity relaxation tolerance} \\
-\\
-\textbf{Strategic (ULP) variables:}\quad
-& Q^{offer}_r \in [0,Q^{cap}_r] && \text{Offered capacity in } r \\
-& \tau^{imp}_{i r}\in[0,\overline{\tau}^{imp}_{i r}] && \text{Import tariff set by } i \text{ on } r \\
-& \tau^{exp}_{r i}\in[0,\overline{\tau}^{exp}_{r i}] && \text{Export tax set by } r \text{ on } i \\
-& \tau^{imp}_{ii}=0,\; \tau^{exp}_{ii}=0 && \forall i \\
-\\
-\textbf{LLP primal variables:}\quad
-& x_{r i}\ge 0 && \text{Shipment } r\to i \\
-& x^{dem}_i \in [0,D^{max}_i] && \text{Consumption in } i \\
-\\
-\textbf{LLP dual variables:}\quad
-& \lambda_i\in\mathbb{R} && \text{Dual of node balance in } i \\
-& \mu_r\ge 0 && \text{Dual of exporter capacity in } r \\
-& \gamma_{r i}\ge 0 && \text{Dual of } x_{r i}\ge 0 \\
-& \beta_i\ge 0 && \text{Dual of } x^{dem}_i\le D^{max}_i \\
-& \psi_i\ge 0 && \text{Dual of } x^{dem}_i\ge 0 \\
-\\
-\textbf{Implemented price bounds (numerical stabilization):}\quad
-& 0 \le \lambda_i \le a_i && \forall i
-\end{align*}
+%===================================================
+% Model Formulation
+%===================================================
 
-\begin{align*}
-\textbf{Utility:}\quad
-& U_i(x)=a_i x^{dem}_i-\tfrac{1}{2}b_i (x^{dem}_i)^2 \\
-\textbf{Delivered wedge:}\quad
-& k_{r i} := c^{man}_r + c^{ship}_{r i} + \tau^{exp}_{r i} + \tau^{imp}_{i r}
-\end{align*}
+\section{Model Formulation}
 
-\begin{align*}
-\textbf{LLP (system clearing):}\qquad
-\min_{x,\;x^{dem}}\;\;
-& \sum_{r,i\in R} \left(c^{man}_r + c^{ship}_{r i} + \tau^{exp}_{r i} + \tau^{imp}_{i r}\right)x_{r i}
-+ \frac{\varepsilon_x}{2}\sum_{r,i\in R} x_{r i}^2
-- \sum_{i\in R}\left(a_i x^{dem}_i-\tfrac{1}{2}b_i (x^{dem}_i)^2\right) \\
-\text{s.t.}\qquad
-& \sum_{r\in R} x_{r i} - x^{dem}_i = 0 \quad (\lambda_i) && \forall i\in R \\
-& Q^{offer}_r - \sum_{i\in R} x_{r i} \ge 0 \quad (\mu_r) && \forall r\in R \\
-& x_{r i}\ge 0 \quad (\gamma_{r i}) && \forall r,i\in R \\
-& D^{max}_i - x^{dem}_i \ge 0 \quad (\beta_i) && \forall i\in R \\
-& x^{dem}_i \ge 0 \quad (\psi_i) && \forall i\in R
-\end{align*}
+%---------------------------------------------------
+\subsection{Sets}
+%---------------------------------------------------
 
-\begin{align*}
-\textbf{Stationarity (KKT):}\qquad
-& k_{r i} + \varepsilon_x x_{r i} - \lambda_i + \mu_r - \gamma_{r i} = 0 && \forall r,i\in R \\
-& -(a_i-b_i x^{dem}_i) + \lambda_i + \beta_i - \psi_i = 0 && \forall i\in R
-\end{align*}
+\begin{flushleft}
+\begin{tabular}{@{}ll@{}}
+$r, i, e \in R$ & Set of regions (exporters, importers) \\
+\end{tabular}
+\end{flushleft}
 
-\begin{align*}
-\textbf{Complementarity (relaxed):}\qquad
-& \mu_r \cdot \left(Q^{offer}_r-\sum_{i\in R}x_{r i}\right) \le \varepsilon_{comp} && \forall r\in R \\
-& \gamma_{r i}\cdot x_{r i} \le \varepsilon_{comp} && \forall r,i\in R \\
-& \beta_i\cdot (D^{max}_i-x^{dem}_i) \le \varepsilon_{comp} && \forall i\in R \\
-& \psi_i\cdot x^{dem}_i \le \varepsilon_{comp} && \forall i\in R
-\end{align*}
+%---------------------------------------------------
+\subsection{Parameters}
+%---------------------------------------------------
 
-\begin{align*}
-\textbf{ULP (welfare player } r\textbf{):}\qquad
-\max_{Q^{offer}_r,\;\tau^{imp}_{r\cdot},\;\tau^{exp}_{r\cdot}}\;\;
-& w_r \left[ \left(a_r x^{dem}_r-\tfrac{1}{2}b_r (x^{dem}_r)^2\right) - \lambda_r x^{dem}_r \right] \\
-& + \sum_{j\in R} \tau^{imp}_{r j}\, x_{j r} + \sum_{j\in R} \tau^{exp}_{r j}\, x_{r j} \\
-& + \sum_{j\in R}\left(\lambda_j - c^{man}_r - c^{ship}_{r j} - \tau^{imp}_{j r}\right)x_{r j} \\
-& -\rho^{imp}_r\sum_{e\in R}\tau^{imp}_{r e}
-  -\rho^{exp}_r\sum_{i\in R}\tau^{exp}_{r i}
-  -\kappa_r Q^{offer}_r \\
-\text{s.t.}\qquad
-& 0\le Q^{offer}_r \le Q^{cap}_r \\
-& 0\le \tau^{imp}_{r e}\le \overline{\tau}^{imp}_{r e} \\
-& 0\le \tau^{exp}_{r i}\le \overline{\tau}^{exp}_{r i} \\
-& \text{LLP KKT conditions hold.}
-\end{align*}
+\begin{flushleft}
+\begin{tabular}{@{}lp{10cm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$a_i > 0$ & Inverse demand intercept in region $i$: $P_i(x_i) = a_i - b_i x_i$ \\
+$b_i > 0$ & Inverse demand slope in region $i$ \\
+$D^{max}_i > 0$ & Demand/installation capacity cap in region $i$ \\
+$c^{man}_r$ & Manufacturing cost in region $r$ \\
+$c^{ship}_{ri}$ & Shipping cost from region $r$ to region $i$ \\
+$Q^{cap}_r$ & Existing production capacity in region $r$ \\
+$\overline{\tau}^{imp}_{ir} \ge 0$ & Upper bound on import tariff (set by $i$ on imports from $r$) \\
+$\overline{\tau}^{exp}_{ri} \ge 0$ & Upper bound on export tax (set by $r$ on exports to $i$) \\
+$\rho^{imp}_r, \rho^{exp}_r \ge 0$ & Linear penalty weights on tariffs/taxes \\
+$\kappa_r \ge 0$ & Linear penalty on offered capacity $Q^{offer}_r$ \\
+$w_r \ge 0$ & Weight on consumer surplus in welfare objective \\
+$\varepsilon_x \ge 0$ & Flow regularization parameter \\
+$\varepsilon_{comp} \ge 0$ & Complementarity relaxation tolerance \\
+\bottomrule
+\end{tabular}
+\end{flushleft}
+
+%---------------------------------------------------
+\subsection{Upper Level Problem (ULP) Variables}
+%---------------------------------------------------
+
+\begin{flushleft}
+\begin{tabular}{@{}lp{10cm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$Q^{offer}_r \in [0, Q^{cap}_r]$ & Offered production capacity in region $r$ \\
+$\tau^{imp}_{ir} \in [0, \overline{\tau}^{imp}_{ir}]$ & Import tariff set by region $i$ on imports from $r$ \\
+$\tau^{exp}_{ri} \in [0, \overline{\tau}^{exp}_{ri}]$ & Export tax set by region $r$ on exports to $i$ \\
+\bottomrule
+\end{tabular}
+\end{flushleft}
+
+\noindent\textit{Note:} Domestic tariffs are zero: $\tau^{imp}_{ii} = 0$ and $\tau^{exp}_{ii} = 0$ for all $i$.
+
+%---------------------------------------------------
+\subsection{Lower Level Problem (LLP) Variables}
+%---------------------------------------------------
+
+\paragraph{Primal Variables}
+
+\begin{flushleft}
+\begin{tabular}{@{}lp{10cm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$x_{ri} \ge 0$ & Shipment from region $r$ to region $i$ \\
+$x^{dem}_i \in [0, D^{max}_i]$ & Consumption (demand) in region $i$ \\
+\bottomrule
+\end{tabular}
+\end{flushleft}
+
+\paragraph{Dual Variables}
+
+\begin{flushleft}
+\begin{tabular}{@{}lp{10cm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\lambda_i \in \mathbb{R}$ & Dual of node balance constraint in region $i$ \\
+$\mu_r \ge 0$ & Dual of exporter capacity constraint in region $r$ \\
+$\gamma_{ri} \ge 0$ & Dual of non-negativity constraint $x_{ri} \ge 0$ \\
+$\beta_i \ge 0$ & Dual of demand cap constraint $x^{dem}_i \le D^{max}_i$ \\
+$\psi_i \ge 0$ & Dual of non-negativity constraint $x^{dem}_i \ge 0$ \\
+\bottomrule
+\end{tabular}
+\end{flushleft}
+
+%---------------------------------------------------
+\subsection{Auxiliary Definitions}
+%---------------------------------------------------
+
+\begin{flushleft}
+\textbf{Utility function:}
+\end{flushleft}
+\begin{equation}
+U_i(x) = a_i x^{dem}_i - \tfrac{1}{2} b_i (x^{dem}_i)^2
+\end{equation}
+
+\begin{flushleft}
+\textbf{Delivered cost wedge:}
+\end{flushleft}
+\begin{equation}
+k_{ri} := c^{man}_r + c^{ship}_{ri} + \tau^{exp}_{ri} + \tau^{imp}_{ir}
+\end{equation}
+
+%===================================================
+\section{Lower Level Problem (LLP)}
+%===================================================
+
+The Lower Level Problem represents the market clearing (system operator) problem:
+\begin{equation}
+\min_{x, x^{dem}} \quad \sum_{r,i \in R} k_{ri} \, x_{ri} + \frac{\varepsilon_x}{2} \sum_{r,i \in R} x_{ri}^2 - \sum_{i \in R} U_i(x)
+\end{equation}
+
+\noindent subject to:
+\begin{align}
+\sum_{r \in R} x_{ri} - x^{dem}_i &= 0 \quad (\lambda_i) && \forall i \in R \\
+Q^{offer}_r - \sum_{i \in R} x_{ri} &\ge 0 \quad (\mu_r) && \forall r \in R \\
+x_{ri} &\ge 0 \quad (\gamma_{ri}) && \forall r, i \in R \\
+D^{max}_i - x^{dem}_i &\ge 0 \quad (\beta_i) && \forall i \in R \\
+x^{dem}_i &\ge 0 \quad (\psi_i) && \forall i \in R
+\end{align}
+
+%---------------------------------------------------
+\subsection{KKT Stationarity Conditions}
+%---------------------------------------------------
+
+\begin{align}
+k_{ri} + \varepsilon_x x_{ri} - \lambda_i + \mu_r - \gamma_{ri} &= 0 && \forall r, i \in R \\
+-(a_i - b_i x^{dem}_i) + \lambda_i + \beta_i - \psi_i &= 0 && \forall i \in R
+\end{align}
+
+%---------------------------------------------------
+\subsection{Complementarity Conditions (Relaxed)}
+%---------------------------------------------------
+
+\begin{align}
+\mu_r \cdot \left( Q^{offer}_r - \sum_{i \in R} x_{ri} \right) &\le \varepsilon_{comp} && \forall r \in R \\
+\gamma_{ri} \cdot x_{ri} &\le \varepsilon_{comp} && \forall r, i \in R \\
+\beta_i \cdot (D^{max}_i - x^{dem}_i) &\le \varepsilon_{comp} && \forall i \in R \\
+\psi_i \cdot x^{dem}_i &\le \varepsilon_{comp} && \forall i \in R
+\end{align}
+
+%===================================================
+\section{Upper Level Problem (ULP)}
+%===================================================
+
+Each region $r$ solves a welfare maximization problem:
+\begin{equation}
+\max_{Q^{offer}_r, \tau^{imp}_{r \cdot}, \tau^{exp}_{r \cdot}} \quad W_r
+\end{equation}
+
+\noindent where the welfare objective is:
+\begin{align}
+W_r = \; & w_r \left[ U_r(x) - \lambda_r x^{dem}_r \right] \nonumber \\
+& + \sum_{j \in R} \tau^{imp}_{rj} x_{jr} + \sum_{j \in R} \tau^{exp}_{rj} x_{rj} \nonumber \\
+& + \sum_{j \in R} \left( \lambda_j - c^{man}_r - c^{ship}_{rj} - \tau^{imp}_{jr} \right) x_{rj} \nonumber \\
+& - \rho^{imp}_r \sum_{e \in R} \tau^{imp}_{re} - \rho^{exp}_r \sum_{i \in R} \tau^{exp}_{ri} - \kappa_r Q^{offer}_r
+\end{align}
+
+\noindent subject to:
+\begin{align}
+0 &\le Q^{offer}_r \le Q^{cap}_r \\
+0 &\le \tau^{imp}_{re} \le \overline{\tau}^{imp}_{re} \\
+0 &\le \tau^{exp}_{ri} \le \overline{\tau}^{exp}_{ri} \\
+& \text{LLP KKT conditions hold.} \nonumber
+\end{align}
+
+%---------------------------------------------------
+\subsection{Numerical Stabilization}
+%---------------------------------------------------
+
+\begin{flushleft}
+\textbf{Implemented price bounds:}
+\end{flushleft}
+\begin{equation}
+0 \le \lambda_i \le a_i \qquad \forall i \in R
+\end{equation}
     """
     return TEMPLATE
 

@@ -12,8 +12,12 @@ for certain problem structures.
 """
 from __future__ import annotations
 
+import os
+import multiprocessing as mp
+from multiprocessing.pool import Pool, AsyncResult
+import time
 from copy import deepcopy
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List, Tuple, Callable
 
 from .model import ModelData, apply_player_fixings, build_model, extract_state
 
@@ -29,6 +33,7 @@ def solve_jacobi(
     solver_options: Dict[str, float] | None = None,
     working_directory: str | None = None,
     iter_callback: Callable[[int, Dict[str, Dict], float, int], None] | None = None,
+    initial_state: Dict[str, Dict] | None = None,
 ) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
     """
     Solve EPEC using Gauss-Jacobi diagonalization.
@@ -64,14 +69,25 @@ def solve_jacobi(
 
     ctx = build_model(data, working_directory=working_directory)
 
-    # Current strategy profile
-    theta_Q: Dict[str, float] = {r: 0.8 * float(data.Qcap[r]) for r in data.players}
-    theta_tau_imp: Dict[Tuple[str, str], float] = {
-        (imp, exp): 0.0 for imp in data.regions for exp in data.regions
-    }
-    theta_tau_exp: Dict[Tuple[str, str], float] = {
-        (exp, imp): 0.0 for exp in data.regions for imp in data.regions
-    }
+    # Current strategy profile - use initial_state if provided
+    if initial_state:
+        theta_Q: Dict[str, float] = {r: float(initial_state.get("Q_offer", {}).get(r, 0.8 * float(data.Qcap[r]))) for r in data.players}
+        theta_tau_imp: Dict[Tuple[str, str], float] = {
+            (imp, exp): float(initial_state.get("tau_imp", {}).get((imp, exp), 0.0))
+            for imp in data.regions for exp in data.regions
+        }
+        theta_tau_exp: Dict[Tuple[str, str], float] = {
+            (exp, imp): float(initial_state.get("tau_exp", {}).get((exp, imp), 0.0))
+            for exp in data.regions for imp in data.regions
+        }
+    else:
+        theta_Q: Dict[str, float] = {r: 0.8 * float(data.Qcap[r]) for r in data.players}
+        theta_tau_imp: Dict[Tuple[str, str], float] = {
+            (imp, exp): 0.0 for imp in data.regions for exp in data.regions
+        }
+        theta_tau_exp: Dict[Tuple[str, str], float] = {
+            (exp, imp): 0.0 for exp in data.regions for imp in data.regions
+        }
 
     def _rel_change(new: float, old: float, scale: float) -> float:
         return abs(new - old) / max(abs(old), scale)
@@ -208,14 +224,56 @@ def solve_jacobi(
 # PARALLEL JACOBI IMPLEMENTATION
 # =============================================================================
 
-import os
-import time
-from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-
 # Process-global cache for ctx reuse (one ctx per player per process)
 _CTX_CACHE: Dict[str, object] = {}
 _DATA_CACHE: object = None
 _EXCEL_PATH_CACHE: str = ""
+
+
+def get_staged_solver_options(
+    sweep: int,
+    solver: str,
+    base_options: Dict[str, float] | None = None,
+    final_polish: bool = False,
+) -> Dict[str, float]:
+    """
+    Return solver options with tolerances staged by sweep number.
+    
+    Staging strategy:
+    - Sweeps 1-3: looser tolerances (1e-3) to avoid over-solving early
+    - Sweeps 4+: normal tolerances (1e-4)
+    - Final polish (optional): tighter tolerances (1e-5)
+    
+    Also applies KNITRO-specific caps (maxit, maxtime) to prevent stuck solves.
+    """
+    opts = dict(base_options) if base_options else {}
+    solver_lower = solver.strip().lower()
+    
+    # Determine tolerance tier
+    if final_polish:
+        feastol, opttol = 1e-5, 1e-5
+    elif sweep <= 3:
+        feastol, opttol = 1e-3, 1e-3
+    else:
+        feastol, opttol = 1e-4, 1e-4
+    
+    if solver_lower == "knitro":
+        # Override tolerances for staged approach
+        opts["feastol"] = feastol
+        opts["opttol"] = opttol
+        # Apply conservative caps to prevent stuck solves
+        if "maxit" not in opts:
+            opts["maxit"] = 400
+        if "maxtime" not in opts:
+            opts["maxtime"] = 60  # GAMS-KNITRO: seconds (integer)
+    elif solver_lower == "conopt":
+        opts["Tol_Feas_Max"] = feastol
+        opts["Tol_Optimality"] = opttol
+    
+    return opts
+
+
+
 
 
 def _worker_init(excel_path: str, eps_x: float | None, eps_comp: float | None) -> None:
@@ -331,6 +389,10 @@ def solve_jacobi_parallel(
     iter_callback: Callable[[int, Dict[str, Dict], float, int], None] | None = None,
     workers: int = 4,
     worker_timeout: float = 120.0,
+    use_staged_tolerances: bool = True,
+    max_sweep_failures: int | None = None,
+    max_consecutive_failures: int = 3,
+    initial_state: Dict[str, Dict] | None = None,
 ) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
     """
     Solve EPEC using PARALLEL Gauss-Jacobi diagonalization.
@@ -338,6 +400,11 @@ def solve_jacobi_parallel(
     Uses ProcessPoolExecutor to solve all players' best responses in parallel.
     Executor is created ONCE and reused across all sweeps.
     Each worker process caches ctx per player for warm starts.
+    
+    Robustness features:
+    - Staged tolerances: looser early, tighter later (reduces KNITRO stalling)
+    - Graceful failure handling: failed players use previous theta as fallback
+    - Consecutive failure tracking: abort if same player fails too many times
     
     Args:
         data: ModelData instance.
@@ -347,11 +414,15 @@ def solve_jacobi_parallel(
         tol_rel: Relative tolerance for convergence.
         stable_iters: Consecutive stable sweeps required.
         solver: GAMS solver name.
-        solver_options: Solver options dict (must be JSON/pickle-friendly).
+        solver_options: Base solver options dict (staged tolerances override these).
         working_directory: Base GAMS workdir (per-player dirs created under it).
         iter_callback: Optional callback(iter, state, r_strat, stable_count).
         workers: Number of parallel workers.
         worker_timeout: Timeout in seconds for each worker solve (default 120s).
+        use_staged_tolerances: If True, use looser tolerances early and tighten later.
+        max_sweep_failures: Max players that can fail in one sweep before abort.
+                           Default: None = floor(len(players)/2).
+        max_consecutive_failures: Abort if same player fails this many times in a row.
     
     Returns:
         Tuple of (final_state, iter_rows) matching solve_jacobi API.
@@ -381,14 +452,28 @@ def solve_jacobi_parallel(
         os.makedirs(pdir, exist_ok=True)
         player_workdirs[p] = pdir
     
-    # Initialize strategy profile
-    theta_Q: Dict[str, float] = {r: 0.8 * float(data_Qcap.get(r, 0.0)) for r in data_players}
-    theta_tau_imp: Dict[Tuple[str, str], float] = {
-        (imp, exp): 0.0 for imp in data_regions for exp in data_regions
-    }
-    theta_tau_exp: Dict[Tuple[str, str], float] = {
-        (exp, imp): 0.0 for exp in data_regions for imp in data_regions
-    }
+    # Initialize strategy profile - use initial_state if provided
+    if initial_state:
+        theta_Q: Dict[str, float] = {
+            r: float(initial_state.get("Q_offer", {}).get(r, 0.8 * float(data_Qcap.get(r, 0.0))))
+            for r in data_players
+        }
+        theta_tau_imp: Dict[Tuple[str, str], float] = {
+            (imp, exp): float(initial_state.get("tau_imp", {}).get((imp, exp), 0.0))
+            for imp in data_regions for exp in data_regions
+        }
+        theta_tau_exp: Dict[Tuple[str, str], float] = {
+            (exp, imp): float(initial_state.get("tau_exp", {}).get((exp, imp), 0.0))
+            for exp in data_regions for imp in data_regions
+        }
+    else:
+        theta_Q: Dict[str, float] = {r: 0.8 * float(data_Qcap.get(r, 0.0)) for r in data_players}
+        theta_tau_imp: Dict[Tuple[str, str], float] = {
+            (imp, exp): 0.0 for imp in data_regions for exp in data_regions
+        }
+        theta_tau_exp: Dict[Tuple[str, str], float] = {
+            (exp, imp): 0.0 for exp in data_regions for imp in data_regions
+        }
     
     def _rel_change(new: float, old: float, scale: float) -> float:
         return abs(new - old) / max(abs(old), scale)
@@ -413,12 +498,21 @@ def solve_jacobi_parallel(
     actual_workers = min(workers, len(data_players))
     ref_player = data_players[0]  # Reference player for lam
     
-    # Create executor ONCE and reuse across all sweeps
-    with ProcessPoolExecutor(
-        max_workers=actual_workers,
+    # Failure tracking for graceful handling
+    consecutive_failures: Dict[str, int] = {p: 0 for p in data_players}
+    effective_max_sweep_failures = (
+        max_sweep_failures if max_sweep_failures is not None 
+        else len(data_players) // 2
+    )
+    
+    # Create pool manager
+    pool = Pool(
+        processes=actual_workers,
         initializer=_worker_init,
         initargs=(excel_path, float(data.eps_x), float(data.eps_comp)),
-    ) as executor:
+    )
+    
+    try:
         for it in range(1, iters + 1):
             sweep_start = time.perf_counter()
             
@@ -432,27 +526,32 @@ def solve_jacobi_parallel(
             theta_br_ti: Dict[Tuple[str, str], float] = {}
             theta_br_te: Dict[Tuple[str, str], float] = {}
             solve_times: List[float] = []
+            sweep_failures: List[str] = []
+            
+            # Get solver options for this sweep (staged if enabled)
+            if use_staged_tolerances:
+                sweep_solver_options = get_staged_solver_options(
+                    sweep=it, solver=solver, base_options=solver_options
+                )
+            else:
+                sweep_solver_options = solver_options
             
             # Submit all tasks
-            futures = {
-                executor.submit(
+            async_results: Dict[str, AsyncResult] = {}
+            for p in data_players:
+                res = pool.apply_async(
                     _solve_player_br_cached,
-                    p,
-                    player_workdirs[p],
-                    theta_old_Q,
-                    theta_old_ti,
-                    theta_old_te,
-                    solver,
-                    solver_options,
-                ): p
-                for p in data_players
-            }
+                    (p, player_workdirs[p], theta_old_Q, theta_old_ti, theta_old_te, solver, sweep_solver_options)
+                )
+                async_results[p] = res
             
-            # Collect results with timeout
-            for future in as_completed(futures):
-                player = futures[future]
+            # Collect results with timeout and graceful failure handling
+            pool_tainted = False
+            for player, res in async_results.items():
+                pdir = player_workdirs.get(player, "unknown")
                 try:
-                    result = future.result(timeout=worker_timeout)
+                    # Apply timeout to the result.get()
+                    result = res.get(timeout=worker_timeout)
                     solve_times.append(result.get("solve_time", 0.0))
                     
                     # Collect Q_offer
@@ -470,30 +569,67 @@ def solve_jacobi_parallel(
                     # Use lam from reference player
                     if result["player"] == ref_player:
                         ref_lam = result.get("lam", {})
+                    
+                    # Reset consecutive failure counter on success
+                    consecutive_failures[player] = 0
                         
-                except FuturesTimeoutError:
-                    pdir = player_workdirs.get(player, "unknown")
-                    raise RuntimeError(
-                        f"Worker for player '{player}' timed out after {worker_timeout}s.\n"
-                        f"  Workdir: {pdir}\n"
-                        f"  Consider increasing --worker-timeout or checking solver stability."
+                except (mp.TimeoutError, Exception) as e:
+                    # Graceful failure handling: use previous theta as fallback
+                    sweep_failures.append(player)
+                    consecutive_failures[player] += 1
+                    
+                    is_timeout = isinstance(e, mp.TimeoutError)
+                    fail_type = "timed out" if is_timeout else "failed"
+                    
+                    if is_timeout:
+                        pool_tainted = True
+                    
+                    import sys
+                    print(
+                        f"[WARNING] Player '{player}' {fail_type} in sweep {it} "
+                        f"(consecutive: {consecutive_failures[player]}). "
+                        f"Using fallback. Workdir: {pdir}",
+                        file=sys.stderr
                     )
-                except Exception as e:
-                    pdir = player_workdirs.get(player, "unknown")
-                    raise RuntimeError(
-                        f"Worker for player '{player}' failed.\n"
-                        f"  Workdir: {pdir}\n"
-                        f"  Check .lst/.log files in that directory.\n"
-                        f"  Error: {e}"
-                    ) from e
+                    
+                    # Check consecutive failure threshold
+                    if consecutive_failures[player] >= max_consecutive_failures:
+                        raise RuntimeError(
+                            f"Player '{player}' failed {max_consecutive_failures} consecutive times.\n"
+                            f"  Workdir: {pdir}\n"
+                            f"  Check .lst/.log files for solver diagnostics."
+                        ) from (e if not is_timeout else None)
+                    
+                    # Fallback: use previous theta values for this player
+                    theta_br_Q[player] = theta_old_Q[player]
+                    for exp in data_regions:
+                        if exp != player:
+                            theta_br_ti[(player, exp)] = theta_old_ti[(player, exp)]
+                    for imp in data_regions:
+                        if imp != player:
+                            theta_br_te[(player, imp)] = theta_old_te[(player, imp)]
+            
+            # If pool is tainted (timeout occurred), restart it to clear stuck processes
+            if pool_tainted:
+                print(f"[WARN] Pool tainted by timeouts in sweep {it}. Restarting pool to clear stuck workers...", file=sys.stderr)
+                pool.terminate()
+                pool.join()
+                pool = Pool(
+                    processes=actual_workers,
+                    initializer=_worker_init,
+                    initargs=(excel_path, float(data.eps_x), float(data.eps_comp)),
+                )
+
+            
+            # Check if too many failures in this sweep
+            if len(sweep_failures) > effective_max_sweep_failures:
+                raise RuntimeError(
+                    f"Too many player failures in sweep {it}: {len(sweep_failures)} > {effective_max_sweep_failures}\n"
+                    f"  Failed players: {sweep_failures}\n"
+                    f"  Consider checking solver configuration or input data."
+                )
             
             sweep_time = time.perf_counter() - sweep_start
-            
-            # Sanity check
-            assert set(theta_br_Q.keys()) == set(data_players), (
-                f"Parallel Jacobi sanity check failed: theta_br_Q keys {set(theta_br_Q.keys())} "
-                f"!= players {set(data_players)}"
-            )
             
             # === JACOBI: Simultaneous update with damping ===
             for r in data_players:
@@ -545,6 +681,7 @@ def solve_jacobi_parallel(
                 "solve_time_sum": float(solve_sum),
                 "solve_time_max": float(solve_max),
                 "solve_time_mean": float(solve_mean),
+                "sweep_failures": len(sweep_failures),
             })
             
             # State for callback with real lam from reference player
@@ -560,6 +697,10 @@ def solve_jacobi_parallel(
             
             if stable_count >= stable_iters:
                 break
+
+    finally:
+        pool.terminate()
+        pool.join()
     
     # === Final evaluation solve for complete state ===
     # Do one serial solve in main process to get full equilibrium state

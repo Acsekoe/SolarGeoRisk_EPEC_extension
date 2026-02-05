@@ -1,27 +1,46 @@
 # Diagnostics
 
-This folder contains diagnostic tools for debugging parallel Jacobi and solver issues.
+This folder contains diagnostic tools for debugging parallel Jacobi and KNITRO solver issues.
+**Safe to delete** - removing this folder will not affect the main project.
 
 ## Files
 
 - `test_parallel_sweep.py` - Run single parallel sweep to test worker failure detection
+- `check_knitro_concurrency.py` - Test concurrent KNITRO solve capability (license issues)
+- `repro_stuck_player.py` - Reproduce stalling for a specific player with different options
 
 ## Usage
 
+### Test Parallel Sweep
 ```powershell
-# Test parallel sweep with 6 workers
 python diagnostics/test_parallel_sweep.py --workers 6
+python diagnostics/test_parallel_sweep.py --workers 6 --solver knitro --keep-workdir
+```
 
-# Keep workdir for inspection
-python diagnostics/test_parallel_sweep.py --workers 6 --keep-workdir
+### Check KNITRO Concurrency
+```powershell
+# Test if N concurrent KNITRO solves work
+python diagnostics/check_knitro_concurrency.py --workers 4
+python diagnostics/check_knitro_concurrency.py --workers 6 --timeout 90
+```
 
-# Use specific solver
-python diagnostics/test_parallel_sweep.py --workers 6 --solver conopt
+### Reproduce Stuck Player
+```powershell
+# Test specific player with default options
+python diagnostics/repro_stuck_player.py --player DE --runs 3
+
+# Try different KNITRO algorithms
+python diagnostics/repro_stuck_player.py --player DE --algorithm 4  # SQP
+python diagnostics/repro_stuck_player.py --player DE --algorithm 1  # Interior-point
+
+# Loosen tolerances
+python diagnostics/repro_stuck_player.py --player DE --feastol 1e-3 --opttol 1e-3
+
+# Reduce iterations
+python diagnostics/repro_stuck_player.py --player DE --maxit 200
 ```
 
 ## Cleanup
-
-This entire folder can be safely deleted without affecting the main project:
 
 ```powershell
 Remove-Item -Recurse -Force diagnostics/

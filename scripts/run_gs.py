@@ -27,29 +27,29 @@ class RunConfig:
     out_dir: str = "outputs"
     plots_dir: str = "plots"
 
-    # Solver
     solver: str = "knitro"
     feastol: float = 1e-4
     opttol: float = 1e-4
 
-    # Diagonalization
-    method: str = "jacobi"  # "seidel" or "jacobi"
+    method: str = "jacobi"
     iters: int = 20
-    omega: float = 0.8
+    omega: float = 0.9
     tol_rel: float = 1e-2
     stable_iters: int = 3
+    workers: int = 6
+    worker_timeout: float = 20
 
-    # Model regs
+    warmup_solver: str | None = None
+    warmup_iters: int = 5
+    warmup_workers: int = 1
+
     eps_x: float | None = 1e-4
-    eps_comp: float | None = 0
+    eps_comp: float | None = 0.1
 
-    # Knitro defaults (tune here)
-    knitro_outlev: int = 0          # 0 = quiet (faster I/O)
-    knitro_maxit: int = 800         # cut from 2000; outer loop does the heavy lifting
-    knitro_hessopt: int = 1         # 1 = exact Hessian (default); 2 = BFGS can cause errors on some NLPs
+    knitro_outlev: int = 0
+    knitro_maxit: int = 800
+    knitro_hessopt: int = 1
     knitro_algorithm: int | None = None
-    # NOTE: algorithm/hessopt names are standard Knitro options; if GAMS complains,
-    # comment them out and keep feastol/opttol/maxit/outlev which are definitely used.
 
 
 def _safe_float(v: object, default: float = 0.0) -> float:
@@ -112,12 +112,20 @@ def _parse_args() -> argparse.Namespace:
     # Parallel Jacobi
     p.add_argument("--workers", type=int, default=None,
                    help="Parallel workers for Jacobi (default: min(cpu_count, players)).")
-    p.add_argument("--worker-timeout", type=float, default=120.0,
-                   help="Timeout in seconds for each worker solve (default: 120).")
+    p.add_argument("--worker-timeout", type=float, default=None,
+                   help="Timeout in seconds for each worker solve (default: 120, set low to skip lags).")
     p.add_argument("--keep-workdir", action="store_true",
                    help="Keep GAMS workdir after run (for debugging).")
     p.add_argument("--debug-workers", action="store_true",
                    help="Debug mode: verbose solver output, print worker paths.")
+
+    # Hybrid solver: warmup phase
+    p.add_argument("--warmup-solver", type=str, default=None,
+                   help="Solver for warmup phase (e.g., 'knitro' for 2 sequential sweeps before main solver).")
+    p.add_argument("--warmup-iters", type=int, default=None,
+                   help="Number of warmup iterations (default: 3).")
+    p.add_argument("--warmup-workers", type=int, default=None,
+                   help="Workers for warmup phase (default: 1 = sequential).")
 
     return p.parse_args()
 
@@ -176,44 +184,18 @@ def _solver_options(
 
 
 def auto_git_push():
-    """Checks for changes in the 'overleaf' directory and pushes them to origin main."""
+    """Checks for changes in 'overleaf' and pushes to origin main."""
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        repo_root = os.path.abspath(os.path.join(script_dir, ".."))
-
-        print("[GIT] Checking for changes in 'overleaf'...")
-
-        result = subprocess.run(
-            ["git", "status", "--porcelain", "overleaf"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
-        if not result.stdout.strip():
-            print("[GIT] No changes detected in 'overleaf'.")
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if not subprocess.run(["git", "status", "--porcelain", "overleaf"], cwd=root, capture_output=True, text=True, check=True).stdout.strip():
             return
-
-        print("[GIT] Changes detected. Committing and pushing...")
-
-        subprocess.run(["git", "add", "overleaf"], cwd=repo_root, check=True)
-
-        subprocess.run(
-            ["git", "commit", "-m", "Auto-update model equations from run script"],
-            cwd=repo_root,
-            check=True,
-        )
-
-        subprocess.run(["git", "push", "origin", "main"], cwd=repo_root, check=True)
-        print("[GIT] Successfully pushed to origin main.")
-
-    except subprocess.CalledProcessError as e:
-        print(f"[WARN] Git operation failed: {e}")
-    except FileNotFoundError:
-        print("[WARN] 'git' command not found. Skipping auto-push.")
+        print("[GIT] Pushing updates to 'overleaf'...")
+        subprocess.run(["git", "add", "overleaf"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", "Auto-update model equations"], cwd=root, check=True)
+        subprocess.run(["git", "push", "origin", "main"], cwd=root, check=True)
+        print("[GIT] Done.")
     except Exception as e:
-        print(f"[WARN] Unexpected error during git auto-push: {e}")
+        print(f"[WARN] Git auto-push failed: {e}")
 
 
 if __name__ == "__main__":
@@ -238,6 +220,7 @@ if __name__ == "__main__":
     # Workers: default to min(cpu_count, len(players)) for jacobi, 1 otherwise
     default_workers = min(os.cpu_count() or 4, 6)  # 6 = max players
     workers = args.workers if args.workers is not None else default_workers
+    worker_timeout = args.worker_timeout if args.worker_timeout is not None else cfg.worker_timeout
     keep_workdir = args.keep_workdir
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
@@ -309,6 +292,66 @@ if __name__ == "__main__":
 
     total_start = time.perf_counter()
     timing_state["sweep_start"] = total_start
+
+    # === Warmup phase (optional) ===
+    warmup_state = None
+    warmup_iter_rows = []
+    
+    # Resolve warmup settings: CLI > RunConfig
+    warmup_solver_arg = args.warmup_solver if args.warmup_solver is not None else cfg.warmup_solver
+    
+    if warmup_solver_arg:
+        warmup_solver = warmup_solver_arg.strip()
+        warmup_iters = int(args.warmup_iters) if args.warmup_iters is not None else int(cfg.warmup_iters)
+        warmup_workers = int(args.warmup_workers) if args.warmup_workers is not None else int(cfg.warmup_workers)
+        print(f"[WARMUP] Starting {warmup_iters} sweeps with {warmup_solver} (workers={warmup_workers})")
+        
+        warmup_opts = _solver_options(
+            solver=warmup_solver,
+            feastol=feastol,
+            opttol=opttol,
+            cfg=cfg,
+        )
+        print(f"[WARMUP] solver_options={warmup_opts}")
+        
+        if warmup_workers > 1:
+            warmup_state, warmup_iter_rows = solve_jacobi_parallel(
+                data,
+                excel_path=excel_path,
+                iters=warmup_iters,
+                omega=omega,
+                tol_rel=tol_rel,
+                stable_iters=stable_iters,
+                solver=warmup_solver,
+                solver_options=warmup_opts,
+                working_directory=workdir,
+                iter_callback=_iter_log,
+                workers=warmup_workers,
+                worker_timeout=args.worker_timeout,
+            )
+        else:
+            warmup_state, warmup_iter_rows = solve_jacobi(
+                data,
+                iters=warmup_iters,
+                omega=omega,
+                tol_rel=tol_rel,
+                stable_iters=stable_iters,
+                solver=warmup_solver,
+                solver_options=warmup_opts,
+                working_directory=workdir,
+                iter_callback=_iter_log,
+            )
+        
+        # Apply warmup state to data for main phase
+        if warmup_state:
+            print(f"[WARMUP] Complete. Transferring state to main solver...")
+            # Update data with warmup state for warm start
+            data.warmup_state = warmup_state
+        
+        timing_state["sweep_start"] = time.perf_counter()
+    
+    # === Main phase ===
+    print(f"[MAIN] Starting {iters} sweeps with {solver} (workers={workers})")
     try:
         if use_parallel:
             state, iter_rows = solve_jacobi_parallel(
@@ -323,7 +366,8 @@ if __name__ == "__main__":
                 working_directory=workdir,
                 iter_callback=_iter_log,
                 workers=workers,
-                worker_timeout=args.worker_timeout,
+                worker_timeout=worker_timeout,
+                initial_state=warmup_state,
             )
         else:
             solve_fn = solve_jacobi if method == "jacobi" else solve_gs
@@ -337,6 +381,7 @@ if __name__ == "__main__":
                 solver_options=solver_opts,
                 working_directory=workdir,
                 iter_callback=_iter_log,
+                initial_state=warmup_state,
             )
     finally:
         total_elapsed = time.perf_counter() - total_start

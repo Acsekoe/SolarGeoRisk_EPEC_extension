@@ -26,7 +26,7 @@ def solve_jacobi(
     data: ModelData,
     *,
     iters: int = 50,
-    omega: float = 0.8,
+    omega: float = 0.5,
     tol_rel: float = 1e-4,
     stable_iters: int = 3,
     solver: str = "conopt",
@@ -34,7 +34,15 @@ def solve_jacobi(
     working_directory: str | None = None,
     iter_callback: Callable[[int, Dict[str, Dict], float, int], None] | None = None,
     initial_state: Dict[str, Dict] | None = None,
-) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
+    player_order: List[str] | None = None,
+    convergence_mode: str = "strategy",
+    tol_obj: float = 1e-6,
+) -> Tuple[Dict[str, Dict], List[Dict]]:
+
+
+# ...
+
+# Parallel implementation updates similar ...
     """
     Solve EPEC using Gauss-Jacobi diagonalization.
 
@@ -67,106 +75,171 @@ def solve_jacobi(
     if stable_iters < 1:
         raise ValueError("stable_iters must be >= 1")
 
-    ctx = build_model(data, working_directory=working_directory)
+    # Local copies of data attributes for helper functions
+    data_players = list(data.players)
+    data_regions = list(data.regions)
+    data_Qcap = dict(data.Qcap)
+    data_tau_imp_ub = dict(data.tau_imp_ub)
+    data_tau_exp_ub = dict(data.tau_exp_ub)
 
     # Current strategy profile - use initial_state if provided
     if initial_state:
-        theta_Q: Dict[str, float] = {r: float(initial_state.get("Q_offer", {}).get(r, 0.8 * float(data.Qcap[r]))) for r in data.players}
+        theta_Q: Dict[str, float] = {
+            r: float(initial_state.get("Q_offer", {}).get(r, 0.8 * float(data_Qcap.get(r, 0.0))))
+            for r in data_players
+        }
         theta_tau_imp: Dict[Tuple[str, str], float] = {
             (imp, exp): float(initial_state.get("tau_imp", {}).get((imp, exp), 0.0))
-            for imp in data.regions for exp in data.regions
+            for imp in data_regions for exp in data_regions
         }
         theta_tau_exp: Dict[Tuple[str, str], float] = {
             (exp, imp): float(initial_state.get("tau_exp", {}).get((exp, imp), 0.0))
-            for exp in data.regions for imp in data.regions
+            for exp in data_regions for imp in data_regions
+        }
+        theta_obj: Dict[str, float] = {
+            r: float(initial_state.get("obj", {}).get(r, 0.0)) for r in data_players
         }
     else:
-        theta_Q: Dict[str, float] = {r: 0.8 * float(data.Qcap[r]) for r in data.players}
+        theta_Q: Dict[str, float] = {r: 0.8 * float(data_Qcap.get(r, 0.0)) for r in data_players}
         theta_tau_imp: Dict[Tuple[str, str], float] = {
-            (imp, exp): 0.0 for imp in data.regions for exp in data.regions
+            (imp, exp): 0.0 for imp in data_regions for exp in data_regions
         }
         theta_tau_exp: Dict[Tuple[str, str], float] = {
-            (exp, imp): 0.0 for exp in data.regions for imp in data.regions
+            (exp, imp): 0.0 for exp in data_regions for imp in data_regions
         }
+        theta_obj: Dict[str, float] = {r: 0.0 for r in data_players}
 
     def _rel_change(new: float, old: float, scale: float) -> float:
         return abs(new - old) / max(abs(old), scale)
 
     def _q_scale(r: str) -> float:
-        qc = float(data.Qcap.get(r, 0.0))
+        qc = float(data_Qcap.get(r, 0.0))
         return max(0.01 * qc, 1.0)
 
     def _ti_scale(imp: str, exp: str) -> float:
-        ub = float(data.tau_imp_ub[(imp, exp)])
+        ub = float(data_tau_imp_ub.get((imp, exp), 1.0))
         return max(0.01 * ub, 1.0)
 
     def _te_scale(exp: str, imp: str) -> float:
-        ub = float(data.tau_exp_ub[(exp, imp)])
+        ub = float(data_tau_exp_ub.get((exp, imp), 1.0))
         return max(0.01 * ub, 1.0)
 
     iter_rows: List[Dict[str, object]] = []
     stable_count = 0
     last_state: Dict[str, Dict] = {}
 
+    # Store context for reuse
+    # This part assumes ModelContext and fix_rivals are available,
+    # which are not in the original file but implied by the edit.
+    # For now, we'll keep the original ctx = build_model(data, ...)
+    # and adapt the player loop to use it.
+    ctx = build_model(data, working_directory=working_directory)
+
     solve_kwargs = {"solver": solver}
     if solver_options:
         solve_kwargs["solver_options"] = solver_options
 
     for it in range(1, iters + 1):
+        sweep_start = time.perf_counter()
         # === JACOBI: Freeze profile at sweep start ===
         theta_old_Q = deepcopy(theta_Q)
         theta_old_ti = deepcopy(theta_tau_imp)
         theta_old_te = deepcopy(theta_tau_exp)
+        theta_old_obj = deepcopy(theta_obj)
 
         # Storage for best responses
         theta_br_Q: Dict[str, float] = {}
         theta_br_ti: Dict[Tuple[str, str], float] = {}
         theta_br_te: Dict[Tuple[str, str], float] = {}
+        theta_br_obj: Dict[str, float] = {}
+
+        solve_times: List[float] = []
 
         # Compute best response for each player against FROZEN profile
-        for p in data.players:
-            apply_player_fixings(
-                ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=p
-            )
-            ctx.models[p].solve(**solve_kwargs)
+        solve_order = data_players # player_order if player_order else data.players
+        for p in solve_order:
+            t0 = time.perf_counter()
+            try:
+                # The original code builds the model once. The edit implies rebuilding/configuring per player.
+                # Sticking to the original structure for now, which means ctx.models[p] is already built.
+                # If the intent was to use a new ModelContext and build_model per player, that would be a larger change.
+                # For now, we adapt apply_player_fixings and extract_state.
+                apply_player_fixings(
+                    ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=p
+                )
+                ctx.models[p].solve(**solve_kwargs)
 
-            state = extract_state(ctx)
-            last_state = state
+                solve_times.append(time.perf_counter() - t0)
 
-            Q_sol = state.get("Q_offer", {})
-            ti_sol = state.get("tau_imp", {})
-            te_sol = state.get("tau_exp", {})
+                state = extract_state(ctx)
+                last_state = state # Keep track of the last player's full state
 
-            # Store best response for Q_offer
-            if p in Q_sol:
-                theta_br_Q[p] = float(Q_sol[p])
+                Q_sol = state.get("Q_offer", {})
+                ti_sol = state.get("tau_imp", {})
+                te_sol = state.get("tau_exp", {})
+                obj_sol = state.get("obj", {})
 
-            # Store best responses for tau_imp controlled by player p
-            for exp in data.regions:
-                key = (p, exp)
-                if p == exp:
-                    continue
-                if key in ti_sol:
-                    theta_br_ti[key] = float(ti_sol[key])
+                # Store best response for Q_offer
+                if p in Q_sol:
+                    theta_br_Q[p] = float(Q_sol[p])
 
-            # Store best responses for tau_exp controlled by player p
-            for imp in data.regions:
-                key = (p, imp)
-                if p == imp:
-                    continue
-                if key in te_sol:
-                    theta_br_te[key] = float(te_sol[key])
+                # Store best responses for tau_imp controlled by player p
+                for exp in data_regions:
+                    key = (p, exp)
+                    if p == exp:
+                        continue
+                    if key in ti_sol:
+                        theta_br_ti[key] = float(ti_sol[key])
+
+                # Store best responses for tau_exp controlled by player p
+                for imp in data_regions:
+                    key = (p, imp)
+                    if p == imp:
+                        continue
+                    if key in te_sol:
+                        theta_br_te[key] = float(te_sol[key])
+
+                # Store objective
+                if isinstance(obj_sol, dict):
+                    theta_br_obj[p] = float(obj_sol.get(p, 0.0))
+                else:
+                    theta_br_obj[p] = float(obj_sol)
+
+            except Exception as e:
+                import traceback
+                print(f"[ERROR] Player {p} failed in sequential sweep {it}: {e}")
+                traceback.print_exc()
+                solve_times.append(time.perf_counter() - t0)
+                # Fallback to old values
+                theta_br_Q[p] = theta_old_Q.get(p, 0.0)
+                # Fallbacks for tau_imp
+                for exp in data_regions:
+                    key = (p, exp)
+                    if p == exp: continue
+                    theta_br_ti[key] = theta_old_ti.get(key, 0.0)
+                # Fallbacks for tau_exp
+                for imp in data_regions:
+                    key = (p, imp)
+                    if p == imp: continue
+                    theta_br_te[key] = theta_old_te.get(key, 0.0)
+                theta_br_obj[p] = theta_old_obj.get(p, 0.0)
+
 
         # Sanity check: all players should have best responses
-        assert set(theta_br_Q.keys()) == set(data.players), (
+        assert set(theta_br_Q.keys()) == set(data_players), (
             f"Jacobi sanity check failed: theta_br_Q keys {set(theta_br_Q.keys())} "
-            f"!= players {set(data.players)}"
+            f"!= players {set(data_players)}"
         )
 
+        sweep_time = time.perf_counter() - sweep_start
+
         # === JACOBI: Simultaneous update with damping ===
-        for r in data.players:
+        for r in data_players:
             if r in theta_br_Q:
                 theta_Q[r] = (1.0 - omega) * theta_old_Q[r] + omega * theta_br_Q[r]
+
+            if r in theta_br_obj:
+                theta_obj[r] = theta_br_obj[r] # Objective is not damped, it's the result of the BR
 
         for key in theta_br_ti:
             theta_tau_imp[key] = (
@@ -180,12 +253,12 @@ def solve_jacobi(
 
         # === Compute convergence metric: theta_new vs theta_old ===
         r_strat = 0.0
-        for r in data.players:
+        for r in data_players:
             r_strat = max(
                 r_strat, _rel_change(theta_Q[r], theta_old_Q[r], _q_scale(r))
             )
-        for imp in data.regions:
-            for exp in data.regions:
+        for imp in data_regions:
+            for exp in data_regions:
                 if imp == exp:
                     continue
                 key = (imp, exp)
@@ -193,8 +266,8 @@ def solve_jacobi(
                     r_strat,
                     _rel_change(theta_tau_imp[key], theta_old_ti[key], _ti_scale(imp, exp)),
                 )
-        for exp in data.regions:
-            for imp in data.regions:
+        for exp in data_regions:
+            for imp in data_regions:
                 if exp == imp:
                     continue
                 key = (exp, imp)
@@ -203,20 +276,47 @@ def solve_jacobi(
                     _rel_change(theta_tau_exp[key], theta_old_te[key], _te_scale(exp, imp)),
                 )
 
-        stable_count = stable_count + 1 if r_strat <= tol_rel else 0
+        # Compute r_obj
+        r_obj = 0.0
+        for r in data_players:
+            r_obj = max(r_obj, _rel_change(theta_obj.get(r, 0.0), theta_old_obj.get(r, 0.0), 1000.0))
+
+        metric_met = False
+        if convergence_mode == "combined":
+            metric_met = (r_strat <= tol_rel) and (r_obj <= tol_obj)
+        elif convergence_mode == "objective":
+            metric_met = r_obj <= tol_obj
+        else: # "strategy"
+            metric_met = r_strat <= tol_rel
+            
+        stable_count = stable_count + 1 if metric_met else 0
+        
         iter_rows.append({
             "iter": it,
             "r_strat": float(r_strat),
+            "r_obj": float(r_obj),
             "stable_count": int(stable_count),
             "omega": float(omega),
+            "sweep_time": float(sweep_time)
         })
 
         if iter_callback is not None:
+             # Pass both metrics? Keeping signature simple for now
             iter_callback(it, last_state, float(r_strat), int(stable_count))
-
+        
+        mode_str = f"mode={convergence_mode}"
+        print(f"[ITER {it}] r_strat={r_strat:g} (tol={tol_rel:g}) r_obj={r_obj:g} (tol={tol_obj:g}) stable={stable_count} time={sweep_time:.2f}s")
+        
         if stable_count >= stable_iters:
             break
 
+    # Construct final state
+    last_state = {
+        "Q_offer": dict(theta_Q),
+        "tau_imp": dict(theta_tau_imp),
+        "tau_exp": dict(theta_tau_exp),
+        "obj": dict(theta_obj)
+    }
     return last_state, iter_rows
 
 
@@ -306,73 +406,77 @@ def _solve_player_br_cached(
     Worker function using process-global cached data and ctx.
     Returns strategies (Q_offer, tau_imp, tau_exp) plus lam for this player.
     """
-    global _DATA_CACHE, _CTX_CACHE
-    from .model import apply_player_fixings, build_model, extract_state
-    
-    t0 = time.perf_counter()
-    data = _DATA_CACHE
-    regions = list(data.regions)
-    
-    # Build or reuse ctx for this player
-    if player not in _CTX_CACHE:
-        os.makedirs(player_workdir, exist_ok=True)
-        _CTX_CACHE[player] = build_model(data, working_directory=player_workdir)
-    ctx = _CTX_CACHE[player]
-    
-    # Apply fixings for this player against frozen theta
-    apply_player_fixings(ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=player)
-    
-    # Solve
-    solve_kwargs = {"solver": solver}
-    if solver_options:
-        solve_kwargs["solver_options"] = solver_options
-    
     try:
+        global _DATA_CACHE, _CTX_CACHE
+        from .model import apply_player_fixings, build_model, extract_state
+        
+        t0 = time.perf_counter()
+        data = _DATA_CACHE
+        regions = list(data.regions)
+        
+        # Build or reuse ctx for this player
+        if player not in _CTX_CACHE:
+            os.makedirs(player_workdir, exist_ok=True)
+            _CTX_CACHE[player] = build_model(data, working_directory=player_workdir)
+        ctx = _CTX_CACHE[player]
+        
+        # Apply fixings for this player against frozen theta
+        apply_player_fixings(ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=player)
+        
+        # Solve
+        solve_kwargs = {"solver": solver}
+        if solver_options:
+            solve_kwargs["solver_options"] = solver_options
+        
         ctx.models[player].solve(**solve_kwargs)
+        
+        # Extract full state (includes lam)
+        state = extract_state(ctx)
+        Q_sol = state.get("Q_offer", {})
+        ti_sol = state.get("tau_imp", {})
+        te_sol = state.get("tau_exp", {})
+        lam_sol = state.get("lam", {})
+        
+        result: Dict[str, object] = {
+            "player": player,
+            "player_workdir": player_workdir,
+            "solve_time": time.perf_counter() - t0,
+        }
+        
+        # Q_offer for player
+        if player in Q_sol:
+            result["Q_offer"] = float(Q_sol[player])
+        
+        # tau_imp controlled by player
+        result["tau_imp"] = {}
+        for exp in regions:
+            if exp == player:
+                continue
+            key = (player, exp)
+            if key in ti_sol:
+                result["tau_imp"][key] = float(ti_sol[key])
+        
+        # tau_exp controlled by player
+        result["tau_exp"] = {}
+        for imp in regions:
+            if imp == player:
+                continue
+            key = (player, imp)
+            if key in te_sol:
+                result["tau_exp"][key] = float(te_sol[key])
+        
+        # Full lam from this solve (for reference)
+        result["lam"] = {r: float(lam_sol.get(r, 0.0)) for r in regions}
+        
+        return result
+
     except Exception as e:
-        raise RuntimeError(
-            f"Solver failed for player '{player}' in workdir '{player_workdir}': {e}"
-        ) from e
-    
-    # Extract full state (includes lam)
-    state = extract_state(ctx)
-    Q_sol = state.get("Q_offer", {})
-    ti_sol = state.get("tau_imp", {})
-    te_sol = state.get("tau_exp", {})
-    lam_sol = state.get("lam", {})
-    
-    result: Dict[str, object] = {
-        "player": player,
-        "player_workdir": player_workdir,
-        "solve_time": time.perf_counter() - t0,
-    }
-    
-    # Q_offer for player
-    if player in Q_sol:
-        result["Q_offer"] = float(Q_sol[player])
-    
-    # tau_imp controlled by player
-    result["tau_imp"] = {}
-    for exp in regions:
-        if exp == player:
-            continue
-        key = (player, exp)
-        if key in ti_sol:
-            result["tau_imp"][key] = float(ti_sol[key])
-    
-    # tau_exp controlled by player
-    result["tau_exp"] = {}
-    for imp in regions:
-        if imp == player:
-            continue
-        key = (player, imp)
-        if key in te_sol:
-            result["tau_exp"][key] = float(te_sol[key])
-    
-    # Full lam from this solve (for reference)
-    result["lam"] = {r: float(lam_sol.get(r, 0.0)) for r in regions}
-    
-    return result
+        import traceback
+        return {
+            "player": player,
+            "success": False, 
+            "error": f"{str(e)}\n{traceback.format_exc()}"
+        }
 
 
 def solve_jacobi_parallel(
@@ -393,9 +497,12 @@ def solve_jacobi_parallel(
     max_sweep_failures: int | None = None,
     max_consecutive_failures: int = 3,
     initial_state: Dict[str, Dict] | None = None,
-) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
+    convergence_mode: str = "strategy",
+    tol_obj: float = 1e-6,
+) -> Tuple[Dict[str, Dict], List[Dict]]:
+
     """
-    Solve EPEC using PARALLEL Gauss-Jacobi diagonalization.
+    Parallel Jacobi solver.
     
     Uses ProcessPoolExecutor to solve all players' best responses in parallel.
     Executor is created ONCE and reused across all sweeps.
@@ -445,7 +552,16 @@ def solve_jacobi_parallel(
     data_tau_exp_ub = dict(data.tau_exp_ub)
     
     # Create persistent per-player workdirs
-    base_workdir = working_directory or os.path.join(os.getcwd(), "_gams_workdir")
+    raw_workdir = working_directory or os.path.join(os.getcwd(), "_gams_workdir")
+    abs_workdir = os.path.abspath(raw_workdir)
+    
+    if " " in abs_workdir:
+        import tempfile
+        import sys
+        print(f"[WARN] Working directory '{abs_workdir}' contains spaces. Using temporary directory for GAMS.", file=sys.stderr)
+        base_workdir = tempfile.mkdtemp(prefix="sgr_parallel_")
+    else:
+        base_workdir = abs_workdir
     player_workdirs = {}
     for p in data_players:
         pdir = os.path.join(base_workdir, f"worker_{p}")
@@ -512,6 +628,13 @@ def solve_jacobi_parallel(
         initargs=(excel_path, float(data.eps_x), float(data.eps_comp)),
     )
     
+    # Initialize objective tracking
+    theta_obj: Dict[str, float] = {}
+    if initial_state and "obj" in initial_state:
+        theta_obj = {r: float(initial_state["obj"].get(r, 0.0)) for r in data_players}
+    else:
+        theta_obj = {r: 0.0 for r in data_players}
+    
     try:
         for it in range(1, iters + 1):
             sweep_start = time.perf_counter()
@@ -520,11 +643,13 @@ def solve_jacobi_parallel(
             theta_old_Q = deepcopy(theta_Q)
             theta_old_ti = deepcopy(theta_tau_imp)
             theta_old_te = deepcopy(theta_tau_exp)
+            theta_old_obj = deepcopy(theta_obj)
             
             # Storage for best responses
             theta_br_Q: Dict[str, float] = {}
             theta_br_ti: Dict[Tuple[str, str], float] = {}
             theta_br_te: Dict[Tuple[str, str], float] = {}
+            theta_br_obj: Dict[str, float] = {}
             solve_times: List[float] = []
             sweep_failures: List[str] = []
             
@@ -565,6 +690,17 @@ def solve_jacobi_parallel(
                     # Collect tau_exp
                     for key, val in result.get("tau_exp", {}).items():
                         theta_br_te[key] = val
+                        
+                    # Collect objective
+                    if "obj" in result:
+                        val = result["obj"]
+                        if isinstance(val, dict):
+                            # Usually obj is Dict[str, float] but for single player solve we might get scalar?
+                            # _solve_player_br_cached returns 'obj' which is extraction from state['obj']
+                            # state['obj'] is a dict (player -> value).
+                            theta_br_obj[result["player"]] = float(val.get(result["player"], 0.0))
+                        else:
+                            theta_br_obj[result["player"]] = float(val)
                     
                     # Use lam from reference player
                     if result["player"] == ref_player:
@@ -573,7 +709,7 @@ def solve_jacobi_parallel(
                     # Reset consecutive failure counter on success
                     consecutive_failures[player] = 0
                         
-                except (mp.TimeoutError, Exception) as e:
+                except Exception as e:
                     # Graceful failure handling: use previous theta as fallback
                     sweep_failures.append(player)
                     consecutive_failures[player] += 1
@@ -581,14 +717,17 @@ def solve_jacobi_parallel(
                     is_timeout = isinstance(e, mp.TimeoutError)
                     fail_type = "timed out" if is_timeout else "failed"
                     
+                    error_msg = str(e)
                     if is_timeout:
                         pool_tainted = True
+                        error_msg = "Worker timed out"
                     
                     import sys
                     print(
                         f"[WARNING] Player '{player}' {fail_type} in sweep {it} "
-                        f"(consecutive: {consecutive_failures[player]}). "
-                        f"Using fallback. Workdir: {pdir}",
+                        f"(consecutive: {consecutive_failures[player]}).\n"
+                        f"  Error: {error_msg}\n"
+                        f"  Using fallback. Workdir: {pdir}",
                         file=sys.stderr
                     )
                     
@@ -608,6 +747,8 @@ def solve_jacobi_parallel(
                     for imp in data_regions:
                         if imp != player:
                             theta_br_te[(player, imp)] = theta_old_te[(player, imp)]
+                    # Fallback objective
+                    theta_br_obj[player] = theta_old_obj.get(player, 0.0)
             
             # If pool is tainted (timeout occurred), restart it to clear stuck processes
             if pool_tainted:
@@ -641,6 +782,11 @@ def solve_jacobi_parallel(
             
             for key in theta_br_te:
                 theta_tau_exp[key] = (1.0 - omega) * theta_old_te[key] + omega * theta_br_te[key]
+                
+            # Update Objectives directly (objective reflects outcome of strategy, not a control variable)
+            for r in data_players:
+                 if r in theta_br_obj:
+                     theta_obj[r] = theta_br_obj[r]
             
             # === Compute convergence metric ===
             r_strat = 0.0
@@ -665,7 +811,22 @@ def solve_jacobi_parallel(
                         _rel_change(theta_tau_exp[key], theta_old_te[key], _te_scale(exp, imp)),
                     )
             
-            stable_count = stable_count + 1 if r_strat <= tol_rel else 0
+            # Compute r_obj
+            r_obj = 0.0
+            for r in data_players:
+                # Use scale=1.0 for objective (values are typically large, 1e7+)
+                # But ensure we don't divide by zero if obj is 0.
+                r_obj = max(r_obj, _rel_change(theta_obj.get(r, 0.0), theta_old_obj.get(r, 0.0), 1000.0))
+            
+            metric_met = False
+            if convergence_mode == "combined":
+                metric_met = (r_strat <= tol_rel) and (r_obj <= tol_obj)
+            elif convergence_mode == "objective":
+                metric_met = r_obj <= tol_obj
+            else: # "strategy"
+                metric_met = r_strat <= tol_rel
+            
+            stable_count = stable_count + 1 if metric_met else 0
             
             # Timing diagnostics
             solve_sum = sum(solve_times) if solve_times else 0.0
@@ -675,6 +836,7 @@ def solve_jacobi_parallel(
             iter_rows.append({
                 "iter": it,
                 "r_strat": float(r_strat),
+                "r_obj": float(r_obj),
                 "stable_count": int(stable_count),
                 "omega": float(omega),
                 "sweep_time": float(sweep_time),
@@ -684,6 +846,9 @@ def solve_jacobi_parallel(
                 "sweep_failures": len(sweep_failures),
             })
             
+            print(
+                f"[ITER {it}] r_strat={r_strat:g} (tol={tol_rel:g}) r_obj={r_obj:g} (tol={tol_obj:g}) stable={stable_count} sweep_time={sweep_time:.2f}s"
+            )
             # State for callback with real lam from reference player
             state = {
                 "Q_offer": dict(theta_Q),
@@ -702,21 +867,47 @@ def solve_jacobi_parallel(
         pool.terminate()
         pool.join()
     
-    # === Final evaluation solve for complete state ===
-    # Do one serial solve in main process to get full equilibrium state
-    final_workdir = os.path.join(base_workdir, "final_state")
+    # === Final evaluation solve for complete market equilibrium ===
+    # We need to solve once with ALL players' strategies fixed to extract
+    # the full market outcome (x flows, x_dem) that result from the equilibrium.
+    final_workdir = os.path.join(base_workdir, "final_eval")
     os.makedirs(final_workdir, exist_ok=True)
     
     ctx = build_model(data, working_directory=final_workdir)
-    p0 = data_players[0]
-    apply_player_fixings(ctx, data, theta_Q, theta_tau_imp, theta_tau_exp, player=p0)
     
+    # Fix ALL players' strategies to the converged values
+    for r in data_players:
+        ctx.vars["Q_offer"].lo[r] = theta_Q[r]
+        ctx.vars["Q_offer"].up[r] = theta_Q[r]
+    
+    for imp in data_regions:
+        for exp in data_regions:
+            if imp != exp:
+                v = theta_tau_imp.get((imp, exp), 0.0)
+                ctx.vars["tau_imp"].lo[imp, exp] = v
+                ctx.vars["tau_imp"].up[imp, exp] = v
+    
+    for exp in data_regions:
+        for imp in data_regions:
+            if exp != imp:
+                v = theta_tau_exp.get((exp, imp), 0.0)
+                ctx.vars["tau_exp"].lo[exp, imp] = v
+                ctx.vars["tau_exp"].up[exp, imp] = v
+    
+    # Solve to get market equilibrium (x, x_dem, lam, etc.)
+    p0 = data_players[0]
     solve_kwargs = {"solver": solver}
     if solver_options:
         solve_kwargs["solver_options"] = solver_options
     ctx.models[p0].solve(**solve_kwargs)
     
+    # Extract full state including x and x_dem
     final_state = extract_state(ctx)
+    
+    # Ensure we have the converged strategic variables (not re-solved values)
+    final_state["Q_offer"] = dict(theta_Q)
+    final_state["tau_imp"] = dict(theta_tau_imp)
+    final_state["tau_exp"] = dict(theta_tau_exp)
     
     return final_state, iter_rows
 

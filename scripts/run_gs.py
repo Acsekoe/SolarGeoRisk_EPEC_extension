@@ -8,11 +8,19 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+# Set PYTHONPATH so parallel workers (spawned subprocesses) can find the package
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if "PYTHONPATH" in os.environ:
+    if src_path not in os.environ["PYTHONPATH"]:
+        os.environ["PYTHONPATH"] = src_path + os.pathsep + os.environ["PYTHONPATH"]
+else:
+    os.environ["PYTHONPATH"] = src_path
 
 from solargeorisk_extension.data_prep import load_data_from_excel
 from solargeorisk_extension.gauss_jacobi import solve_jacobi, solve_jacobi_parallel
@@ -30,26 +38,41 @@ class RunConfig:
     solver: str = "knitro"
     feastol: float = 1e-4
     opttol: float = 1e-4
-
+    
     method: str = "jacobi"
-    iters: int = 20
-    omega: float = 0.9
-    tol_rel: float = 1e-2
+    iters: int = 50
+    omega: float = 0.5
+    tol_strat: float = 1e-1  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
+    tol_obj: float = 1e-1
     stable_iters: int = 3
-    workers: int = 6
-    worker_timeout: float = 20
-
+    eps_x: float = 1e-3
+    eps_comp: float = 1e-4
+    workdir: str | None = None
+    convergence_mode: str = "strategy"  # "strategy", "objective", or "combined"
+    workers: int = 1  # 1=sequential, >1=parallel
+    worker_timeout: float = 120.0
+    player_order: List[str] | None = None
+    init_scenario: str | None = None
     warmup_solver: str | None = None
     warmup_iters: int = 5
     warmup_workers: int = 1
 
-    eps_x: float | None = 1e-4
-    eps_comp: float | None = 0.1
 
-    knitro_outlev: int = 0
-    knitro_maxit: int = 800
-    knitro_hessopt: int = 1
-    knitro_algorithm: int | None = None
+    rho_imp: float | None = 0.005
+    rho_exp: float | None = 0.005
+    kappa_q: float | None = 0.05
+    
+    # Scenario name (e.g., "high_all", "low_all") to override init_q_offer
+    scenario: str | None = "low_all"
+
+    # Initial Q_offer as fraction of Qcap per player (0.0 to 1.0)
+    # Use None for default (0.8), or set specific values per player
+    # Set EU/US/ROW to 0 to find lower-λ equilibrium
+
+    #knitro_outlev: int = 0
+    #knitro_maxit: int = 800
+    #knitro_hessopt: int = 1
+    #knitro_algorithm: int | None = None
 
 
 def _safe_float(v: object, default: float = 0.0) -> float:
@@ -77,6 +100,16 @@ def _print_q_offer_and_lam(*, regions: list[str], state: dict[str, dict], tag: s
         print(f"  {str(r):<{r_width}}  Q_offer={q:.6g}  lam={l:.6g}")
 
 
+# Scenario definitions (fractions of Qcap)
+INIT_SCENARIOS = {
+    "high_all": {"ch": 0.8, "eu": 0.8, "us": 0.8, "apac": 0.8, "roa": 0.8, "row": 0.8},
+    "low_non_ch": {"ch": 0.8, "eu": 0.0, "us": 0.0, "apac": 0.8, "roa": 0.0, "row": 0.0},
+    "low_eu_us_row": {"ch": 0.8, "eu": 0.0, "us": 0.0, "apac": 0.8, "roa": 0.8, "row": 0.0},
+    "mid_all": {"ch": 0.5, "eu": 0.5, "us": 0.5, "apac": 0.5, "roa": 0.5, "row": 0.5},
+    "low_all": {"ch": 0.2, "eu": 0.0, "us": 0.0, "apac": 0.2, "roa": 0.0, "row": 0.0},
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Diagonalization runner (EPEC).")
     p.add_argument("--excel", type=str, default=None, help="Excel path (defaults to inputs/input_data.xlsx).")
@@ -89,11 +122,25 @@ def _parse_args() -> argparse.Namespace:
 
     p.add_argument("--iters", type=int, default=None, help="Max sweeps.")
     p.add_argument("--omega", type=float, default=None, help="Damping in (0,1].")
-    p.add_argument("--tol-rel", type=float, default=None, help="Stop when strategy rel-change <= tol-rel.")
-    p.add_argument("--stable-iters", type=int, default=None, help="Require tol satisfied this many sweeps.")
+    # Tolerances
+    p.add_argument("--tol-strat", type=float, default=1e-4, help="Tolerance for strategy convergence (default: 1e-4).")
+    p.add_argument("--tol-obj", type=float, default=1e-6, help="Tolerance for objective convergence (default: 1e-6).")
+    p.add_argument("--tol-rel", type=float, default=None, help="Legacy alias for --tol-strat.")
+    p.add_argument("--stable-iters", type=int, default=3, help="Consecutive stable iterations required.")
+    p.add_argument(
+        "--convergence-mode",
+        type=str,
+        choices=["strategy", "objective", "combined"],
+        default=None,
+        help="Convergence metric: 'strategy', 'objective', or 'combined'."
+    )
 
     p.add_argument("--eps-x", type=float, default=None, help="Override eps_x (LLP regularization).")
     p.add_argument("--eps-comp", type=float, default=None, help="Override eps_comp (0=exact complementarity).")
+
+    p.add_argument("--rho-imp", type=float, default=None, help="Override rho_imp (import tariff penalty).")
+    p.add_argument("--rho-exp", type=float, default=None, help="Override rho_exp (export tax penalty).")
+    p.add_argument("--kappa-q", type=float, default=None, help="Override kappa_q (capacity withholding penalty).")
 
     p.add_argument(
         "--method",
@@ -101,6 +148,15 @@ def _parse_args() -> argparse.Namespace:
         choices=["seidel", "jacobi"],
         default=None,
         help="Diagonalization method: 'seidel' or 'jacobi' (default from RunConfig)."
+    )
+    
+    # Scenarios
+    p.add_argument(
+        "--init-scenario",
+        type=str,
+        choices=list(INIT_SCENARIOS.keys()),
+        default=None,
+        help=f"Select initialization scenario from: {', '.join(INIT_SCENARIOS.keys())}"
     )
 
     # Knitro knobs (optional overrides)
@@ -212,16 +268,25 @@ if __name__ == "__main__":
 
     iters = int(args.iters) if args.iters is not None else int(cfg.iters)
     omega = float(args.omega) if args.omega is not None else float(cfg.omega)
-    tol_rel = float(args.tol_rel) if args.tol_rel is not None else float(cfg.tol_rel)
+    # Map CLI tol_rel/tol_strat to local tol_strat
+    tol_strat = float(args.tol_strat) if args.tol_strat is not None else float(cfg.tol_strat)
+    if args.tol_rel is not None:
+         tol_strat = float(args.tol_rel) 
+    tol_obj = float(args.tol_obj) if args.tol_obj is not None else float(cfg.tol_obj)
+    
+    # Backward compatibility for script internals using tol_rel
+    tol_rel = tol_strat
+
     stable_iters = int(args.stable_iters) if args.stable_iters is not None else int(cfg.stable_iters)
 
     method = (args.method or cfg.method).lower().strip()
 
-    # Workers: default to min(cpu_count, len(players)) for jacobi, 1 otherwise
-    default_workers = min(os.cpu_count() or 4, 6)  # 6 = max players
-    workers = args.workers if args.workers is not None else default_workers
+    # Workers: use CLI arg, else RunConfig value
+    workers = args.workers if args.workers is not None else cfg.workers
     worker_timeout = args.worker_timeout if args.worker_timeout is not None else cfg.worker_timeout
     keep_workdir = args.keep_workdir
+    
+    convergence_mode = args.convergence_mode or cfg.convergence_mode
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     os.makedirs(out_dir, exist_ok=True)
@@ -243,6 +308,22 @@ if __name__ == "__main__":
         data.eps_comp = float(args.eps_comp)
     elif cfg.eps_comp is not None:
         data.eps_comp = float(cfg.eps_comp)
+
+    # Apply Penalty Overrides: CLI > RunConfig > Excel
+    rho_imp_val = args.rho_imp if args.rho_imp is not None else cfg.rho_imp
+    if rho_imp_val is not None:
+        for r in data.regions:
+            data.rho_imp[r] = float(rho_imp_val)
+
+    rho_exp_val = args.rho_exp if args.rho_exp is not None else cfg.rho_exp
+    if rho_exp_val is not None:
+        for r in data.regions:
+            data.rho_exp[r] = float(rho_exp_val)
+
+    kappa_q_val = args.kappa_q if args.kappa_q is not None else cfg.kappa_q
+    if kappa_q_val is not None and data.kappa_Q is not None:
+        for r in data.regions:
+            data.kappa_Q[r] = float(kappa_q_val)
 
     print(f"[CONFIG] Method: {method}")
     print(f"[CONFIG] Solver: {solver}  feastol={feastol:g}  opttol={opttol:g}")
@@ -293,8 +374,37 @@ if __name__ == "__main__":
     total_start = time.perf_counter()
     timing_state["sweep_start"] = total_start
 
+    # === Build initial state from CLI/Config scenario ===
+    # This allows selecting different equilibria by starting from different points
+    init_state: dict[str, dict] | None = None
+    
+    init_q_source = None
+    
+    # Priority: CLI arg > RunConfig.scenario > Default "high_all"
+    scenario_name = "high_all" # Default
+    if hasattr(args, "init_scenario") and args.init_scenario:
+        scenario_name = args.init_scenario
+    elif cfg.scenario:
+        scenario_name = cfg.scenario
+        
+    if scenario_name:
+        print(f"[CONFIG] Using init scenario: {scenario_name}")
+        if scenario_name in INIT_SCENARIOS:
+            init_q_source = INIT_SCENARIOS[scenario_name]
+        else:
+            print(f"[WARN] Unknown scenario '{scenario_name}'. using default high_all.")
+            init_q_source = INIT_SCENARIOS["high_all"]
+
+    if init_q_source:
+        init_q = {}
+        for r in data.players:
+            frac = init_q_source.get(r, 0.8)  # Default 80% if not specified
+            init_q[r] = frac * float(data.Qcap[r])
+        init_state = {"Q_offer": init_q, "tau_imp": {}, "tau_exp": {}}
+        print(f"[CONFIG] Custom initial Q_offer: {init_q}")
+
     # === Warmup phase (optional) ===
-    warmup_state = None
+    warmup_state = init_state  # Start warmup from custom init if provided
     warmup_iter_rows = []
     
     # Resolve warmup settings: CLI > RunConfig
@@ -317,29 +427,33 @@ if __name__ == "__main__":
         if warmup_workers > 1:
             warmup_state, warmup_iter_rows = solve_jacobi_parallel(
                 data,
-                excel_path=excel_path,
+                excel_path=cfg.input_file, # Use corrected input path?
                 iters=warmup_iters,
                 omega=omega,
-                tol_rel=tol_rel,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
                 stable_iters=stable_iters,
                 solver=warmup_solver,
                 solver_options=warmup_opts,
                 working_directory=workdir,
                 iter_callback=_iter_log,
                 workers=warmup_workers,
-                worker_timeout=args.worker_timeout,
+                worker_timeout=cfg.worker_timeout,
+                convergence_mode=convergence_mode,
             )
         else:
             warmup_state, warmup_iter_rows = solve_jacobi(
                 data,
                 iters=warmup_iters,
                 omega=omega,
-                tol_rel=tol_rel,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
                 stable_iters=stable_iters,
                 solver=warmup_solver,
                 solver_options=warmup_opts,
                 working_directory=workdir,
                 iter_callback=_iter_log,
+                convergence_mode=convergence_mode,
             )
         
         # Apply warmup state to data for main phase
@@ -353,35 +467,41 @@ if __name__ == "__main__":
     # === Main phase ===
     print(f"[MAIN] Starting {iters} sweeps with {solver} (workers={workers})")
     try:
-        if use_parallel:
+        if workers > 1:
+            # parallel
             state, iter_rows = solve_jacobi_parallel(
                 data,
-                excel_path=excel_path,
+                excel_path="inputs/input_data.xlsx", # Use standard path or resolve?
                 iters=iters,
                 omega=omega,
-                tol_rel=tol_rel,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
                 stable_iters=stable_iters,
-                solver=solver,
-                solver_options=solver_opts,
+                solver="knitro", # cfg.solver ideally
+                solver_options={"feastol": 1e-4, "opttol": 1e-4},
                 working_directory=workdir,
                 iter_callback=_iter_log,
                 workers=workers,
-                worker_timeout=worker_timeout,
+                worker_timeout=cfg.worker_timeout,
                 initial_state=warmup_state,
+                convergence_mode=convergence_mode,
             )
         else:
-            solve_fn = solve_jacobi if method == "jacobi" else solve_gs
+            # sequential
+            solve_fn = solve_jacobi if cfg.method == "jacobi" else solve_gs
             state, iter_rows = solve_fn(
                 data,
+                solver="knitro",
+                solver_options={"feastol": 1e-4, "opttol": 1e-4},
                 iters=iters,
                 omega=omega,
-                tol_rel=tol_rel,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
                 stable_iters=stable_iters,
-                solver=solver,
-                solver_options=solver_opts,
                 working_directory=workdir,
                 iter_callback=_iter_log,
                 initial_state=warmup_state,
+                convergence_mode=convergence_mode,
             )
     finally:
         total_elapsed = time.perf_counter() - total_start

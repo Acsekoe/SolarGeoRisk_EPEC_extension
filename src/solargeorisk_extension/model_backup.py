@@ -332,7 +332,7 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
             obj_welfare = (
                 w[r] * cons_surplus
                 + imp_tariff_rev
-                # + exp_tax_rev  <-- REMOVED to avoid double counting
+                + exp_tax_rev
                 + producer_term
                 + pen_imp_quad
                 + pen_exp_quad
@@ -342,7 +342,7 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
             obj_welfare = (
                 w[r] * cons_surplus
                 + imp_tariff_rev
-                # + exp_tax_rev  <-- REMOVED to avoid double counting
+                + exp_tax_rev
                 + producer_term
                 + pen_imp_lin
                 + pen_exp_lin

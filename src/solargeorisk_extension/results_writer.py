@@ -49,6 +49,7 @@ def write_results_excel(
     x = state.get("x", {})
     tau_imp = state.get("tau_imp", {})
     tau_exp = state.get("tau_exp", {})
+    obj = state.get("obj", {})
 
     region_rows: List[Dict[str, object]] = []
     for r in data.regions:
@@ -60,6 +61,7 @@ def write_results_excel(
                 "Q_offer": _safe_get(Q_offer, r, 0.0),
                 "x_dem": _safe_get(x_dem, r, 0.0),
                 "lam": _safe_get(lam, r, 0.0),
+                "obj": _safe_get(obj, r, 0.0),
                 "imports": float(imports),
                 "exports": float(exports),
                 "Qcap": float(data.Qcap[r]),

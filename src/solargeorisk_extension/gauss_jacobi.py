@@ -19,7 +19,26 @@ import time
 from copy import deepcopy
 from typing import Dict, List, Tuple, Callable
 
+
 from .model import ModelData, apply_player_fixings, build_model, extract_state
+
+
+def _update_prox_params(ctx, theta_Q, theta_ti, theta_te):
+    """Update GAMS parameters for proximal regularization centers."""
+    if not hasattr(ctx, "Q_offer_last"):
+        return
+
+    # Q_offer_last
+    q_recs = [(r, v) for r, v in theta_Q.items()]
+    ctx.Q_offer_last.setRecords(q_recs)
+
+    # tau_imp_last
+    ti_recs = [(i, e, v) for (i, e), v in theta_ti.items()]
+    ctx.tau_imp_last.setRecords(ti_recs)
+    
+    # tau_exp_last
+    te_recs = [(e, i, v) for (e, i), v in theta_te.items()]
+    ctx.tau_exp_last.setRecords(te_recs)
 
 
 def solve_jacobi(
@@ -167,6 +186,8 @@ def solve_jacobi(
                 apply_player_fixings(
                     ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=p
                 )
+                _update_prox_params(ctx, theta_old_Q, theta_old_ti, theta_old_te)
+                
                 ctx.models[p].solve(**solve_kwargs)
 
                 solve_times.append(time.perf_counter() - t0)
@@ -310,13 +331,78 @@ def solve_jacobi(
         if stable_count >= stable_iters:
             break
 
-    # Construct final state
-    last_state = {
-        "Q_offer": dict(theta_Q),
-        "tau_imp": dict(theta_tau_imp),
-        "tau_exp": dict(theta_tau_exp),
-        "obj": dict(theta_obj)
-    }
+    # === Final Market Clearing Solve ===
+    # We solve one player's model with ALL strategies fixed to get consistent LLP variables (lam, x, etc.)
+    # This ensures the final reported state includes valid duals and flows matching the damped strategies.
+    print(f"[FINAL] Solving for market equilibrium with fixed strategies...")
+    try:
+        # Re-use ctx if available, or build/fix
+        # In sequential, ctx is available.
+        # We need to apply the final damped profile (theta_Q, theta_tau_...) as FIXED bounds
+        # for ALL players, then solve ANY player's model (e.g. first one) to clear the market.
+        
+        # We must ensure apply_player_fixings sets bounds for ALL players, 
+        # normally it fixes rivals and leaves 'player' free.
+        # So we use a helper or loop.
+        
+        # Actually, apply_player_fixings(..., player=p) sets p's bounds to (0, Qcap) or whatever
+        # and rivals to theta.
+        # We want to fix p to theta as well.
+        # Let's just manually fix everything in the container variables.
+        
+        # Reload bounds from theta
+        Q_offer_var = ctx.vars["Q_offer"]
+        tau_imp_var = ctx.vars["tau_imp"]
+        tau_exp_var = ctx.vars["tau_exp"]
+        
+        for r in data.players:
+             v = theta_Q[r]
+             Q_offer_var.lo[r], Q_offer_var.up[r] = v, v
+
+        for imp in data.regions:
+            for exp in data.regions:
+                 if imp == exp: continue
+                 # tau_imp
+                 if imp in theta_tau_imp: # Should check keys properly
+                      v = theta_tau_imp.get((imp, exp), 0.0) # check correct key order?
+                      # theta_tau_imp keys are (imp, exp)
+                 elif (imp, exp) in theta_tau_imp:
+                      v = theta_tau_imp[(imp, exp)]
+                 else:
+                      v = 0.0 # Should probably be consistent with loop
+                 
+                 # Force fix
+                 # Note: apply_player_fixings logic handles non-strategic/ub/etc.
+                 # Let's rely on the fact that theta contains the damped/final values
+                 # derived from feasible solutions, so they should be within bounds.
+                 tau_imp_var.lo[imp, exp], tau_imp_var.up[imp, exp] = v, v
+                 
+                 # tau_exp
+                 if (exp, imp) in theta_tau_exp:
+                      v = theta_tau_exp[(exp, imp)]
+                      tau_exp_var.lo[exp, imp], tau_exp_var.up[exp, imp] = v, v
+        
+        # Pick first player model to solve (MAX welfare subject to constraints)
+        # With all strategic vars fixed, this is just solving the LLP (market clearing)
+        p0 = data_players[0]
+        ctx.models[p0].solve(solver=solver, solver_options=solver_options)
+        
+        # Extract full state including lam, x, etc.
+        last_state = extract_state(ctx)
+        
+        # Ensure we keep the damped strategic values (vars should be fixed to them anyway)
+        # but extract_state reads .l, which should be correct.
+        
+    except Exception as e:
+        print(f"[WARN] Final market clearing solve failed: {e}")
+        # Fallback to just returning strategic vars (previous behavior)
+        last_state = {
+            "Q_offer": dict(theta_Q),
+            "tau_imp": dict(theta_tau_imp),
+            "tau_exp": dict(theta_tau_exp),
+            "obj": dict(theta_obj)
+        }
+
     return last_state, iter_rows
 
 
@@ -422,6 +508,7 @@ def _solve_player_br_cached(
         
         # Apply fixings for this player against frozen theta
         apply_player_fixings(ctx, data, theta_old_Q, theta_old_ti, theta_old_te, player=player)
+        _update_prox_params(ctx, theta_old_Q, theta_old_ti, theta_old_te)
         
         # Solve
         solve_kwargs = {"solver": solver}

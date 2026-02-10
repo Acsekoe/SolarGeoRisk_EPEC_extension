@@ -138,6 +138,18 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
     eps_comp = float(data.eps_comp)
     eps_value = gp.Number(eps_comp)
 
+    # Regularization parameters
+    rho_prox_val = float(settings.get("rho_prox", 0.0))
+    rho_prox = gp.Number(rho_prox_val)
+
+    Q_offer_last = Parameter(m, "Q_offer_last", domain=[R])
+    tau_imp_last = Parameter(m, "tau_imp_last", domain=[imp, exp])
+    tau_exp_last = Parameter(m, "tau_exp_last", domain=[exp, imp])
+
+    # Initialize to sensible defaults (e.g. current capacity or zero)
+    Q_offer_last[R] = Qcap[R]
+    tau_imp_last[imp, exp] = z
+    tau_exp_last[exp, imp] = z
 
     # =========================================================================
     # UPPER LEVEL PROBLEM (ULP) - STRATEGIC VARIABLES
@@ -315,7 +327,14 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
 
         pen_imp_lin = -rho_imp[r] * Sum(j, tau_imp[r, j])
         pen_exp_lin = -rho_exp[r] * Sum(j, tau_exp[r, j])
+
         pen_q_lin = -kappa_Q[r] * Q_offer[r]
+
+        # Proximal Regularization Terms: -0.5 * rho_prox * || x - x_last ||^2
+        pen_prox_q = -gp.Number(0.5) * rho_prox * (Q_offer[r] - Q_offer_last[r]) * (Q_offer[r] - Q_offer_last[r])
+        pen_prox_imp = -gp.Number(0.5) * rho_prox * Sum(j, (tau_imp[r, j] - tau_imp_last[r, j]) * (tau_imp[r, j] - tau_imp_last[r, j]))
+        pen_prox_exp = -gp.Number(0.5) * rho_prox * Sum(j, (tau_exp[r, j] - tau_exp_last[r, j]) * (tau_exp[r, j] - tau_exp_last[r, j]))
+
 
         producer_term = Sum(
             j,
@@ -332,21 +351,27 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
             obj_welfare = (
                 w[r] * cons_surplus
                 + imp_tariff_rev
-                # + exp_tax_rev  <-- REMOVED to avoid double counting
+                + exp_tax_rev
                 + producer_term
                 + pen_imp_quad
                 + pen_exp_quad
                 + pen_q_quad
+                + pen_prox_q
+                + pen_prox_imp
+                + pen_prox_exp
             )
         else:
             obj_welfare = (
                 w[r] * cons_surplus
                 + imp_tariff_rev
-                # + exp_tax_rev  <-- REMOVED to avoid double counting
+                + exp_tax_rev
                 + producer_term
                 + pen_imp_lin
                 + pen_exp_lin
                 + pen_q_lin
+                + pen_prox_q
+                + pen_prox_imp
+                + pen_prox_exp
             )
 
         models[r] = Model(
@@ -392,6 +417,12 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
         models=models,
     )
 
+    # Attach last params to context for updates
+    setattr(ctx, "Q_offer_last", Q_offer_last)
+    setattr(ctx, "tau_imp_last", tau_imp_last)
+    setattr(ctx, "tau_exp_last", tau_exp_last)
+
+    return ctx
 
 def apply_player_fixings(
     ctx: ModelContext,

@@ -38,6 +38,7 @@ def write_results_excel(
     data: ModelData,
     state: Dict[str, Dict],
     iter_rows: List[Dict[str, object]],
+    detailed_iter_rows: List[Dict[str, object]] | None = None,
     output_path: str,
     meta: Dict[str, object] | None = None,
 ) -> None:
@@ -88,15 +89,20 @@ def write_results_excel(
     df_flows = pd.DataFrame(flow_rows)
     df_iters = pd.DataFrame(iter_rows)
     df_meta = pd.DataFrame(list((meta or {}).items()), columns=["key", "value"])
+    
+    # Detailed Iterations
+    df_detailed = pd.DataFrame(detailed_iter_rows) if detailed_iter_rows else pd.DataFrame()
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df_regions.to_excel(writer, sheet_name="regions", index=False)
         df_flows.to_excel(writer, sheet_name="flows", index=False)
         df_iters.to_excel(writer, sheet_name="iters", index=False)
+        if not df_detailed.empty:
+            df_detailed.to_excel(writer, sheet_name="detailed_iters", index=False)
         df_meta.to_excel(writer, sheet_name="meta", index=False)
 
     wb = load_workbook(output_path)
-    for sheet in ["regions", "flows", "iters", "meta"]:
+    for sheet in ["regions", "flows", "iters", "detailed_iters", "meta"]:
         if sheet in wb.sheetnames:
             _apply_sheet_formatting(wb[sheet])
     wb.save(output_path)

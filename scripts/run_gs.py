@@ -44,10 +44,10 @@ class RunConfig:
     opttol: float = 1e-4
     
     method: str = "jacobi"
-    iters: int = 50
-    omega: float = 0.4
-    tol_strat: float = 1e-1  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
-    tol_obj: float = 1e-1
+    iters: int = 100
+    omega: float = 0.7
+    tol_strat: float = 1e-2  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
+    tol_obj: float = 1e-2
     stable_iters: int = 3
     eps_x: float = 1e-3
     eps_comp: float = 1e-4
@@ -70,10 +70,12 @@ class RunConfig:
     knitro_algorithm: int | None = None
 
 
-    rho_imp: float | None = 0.005
-    rho_exp: float | None = 0.005
-    kappa_q: float | None = 0.05
-    rho_prox: float | None = 0.015
+    rho_imp: float | None = 0.05
+    rho_exp: float | None = 0.05
+    kappa_q: float | None = 1
+    rho_prox: float | None = 0.05
+    use_quad: bool = True
+
     
     # Scenario name (e.g., "high_all", "low_all") to override init_q_offer
     scenario: str | None = "low_all"
@@ -144,11 +146,21 @@ def _print_q_offer_and_lam(*, regions: list[str], state: dict[str, dict], tag: s
         print(f"[{tag}] No regions configured; skipping Q_offer/lam print.")
         return
 
-    print(f"[{tag}] Q_offer and lam by region:")
+    print(f"[{tag}] Q_offer, lam, and max wedges by region:")
     for r in regions:
         q_val = _safe_float(q_offer.get(r))
         l_val = _safe_float(lam.get(r))
-        print(f"  {r:<5} Q_offer={q_val:<8.6g} lam={l_val:<8.6g}")
+        
+        # Calculate max wedges set BY this region
+        # tau_imp[r, j]: r is importer, sets tariff on j
+        t_i_vals = [state.get("tau_imp", {}).get((r, j), 0.0) for j in regions if j != r]
+        max_ti = max(t_i_vals) if t_i_vals else 0.0
+        
+        # tau_exp[r, j]: r is exporter, sets tax on j
+        t_e_vals = [state.get("tau_exp", {}).get((r, j), 0.0) for j in regions if j != r]
+        max_te = max(t_e_vals) if t_e_vals else 0.0
+        
+        print(f"  {r:<5} Q_offer={q_val:<8.4f} lam={l_val:<8.4f} mx_ti={max_ti:<8.4f} mx_te={max_te:<8.4f}")
 
 
 def _gams_workdir(run_id: str) -> str:
@@ -264,6 +276,7 @@ if __name__ == "__main__":
         data.settings = {}
     if cfg.rho_prox is not None:
         data.settings["rho_prox"] = float(cfg.rho_prox)
+    data.settings["use_quad"] = cfg.use_quad
 
     print(f"[CONFIG] Method: {method}")
     print(f"[CONFIG] Solver: {solver}  feastol={feastol:g}  opttol={opttol:g}")

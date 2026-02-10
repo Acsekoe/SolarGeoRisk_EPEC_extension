@@ -1,28 +1,10 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import Font
-from openpyxl.utils import get_column_letter
-
 from .model import ModelData
-
-
-def _apply_sheet_formatting(ws) -> None:
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-
-    header_font = Font(bold=True)
-    for cell in ws[1]:
-        cell.font = header_font
-
-    for col_idx, cell in enumerate(ws[1], start=1):
-        header = "" if cell.value is None else str(cell.value)
-        width = min(max(len(header), 10), 28)
-        ws.column_dimensions[get_column_letter(col_idx)].width = width + 2
 
 
 def _safe_get(d: Dict, k, default=0.0) -> float:
@@ -52,6 +34,9 @@ def write_results_excel(
     tau_exp = state.get("tau_exp", {})
     obj = state.get("obj", {})
 
+    # --- 1. Prepare DataFrames ---
+    
+    # Regions Sheet
     region_rows: List[Dict[str, object]] = []
     for r in data.regions:
         imports = sum(_safe_get(x, (exp, r), 0.0) for exp in data.regions)
@@ -69,7 +54,9 @@ def write_results_excel(
                 "Dmax": float(data.Dmax[r]),
             }
         )
+    df_regions = pd.DataFrame(region_rows)
 
+    # Flows Sheet
     flow_rows: List[Dict[str, object]] = []
     for exp in data.regions:
         for imp in data.regions:
@@ -84,26 +71,62 @@ def write_results_excel(
                     "c_man": float(data.c_man[exp]),
                 }
             )
-
-    df_regions = pd.DataFrame(region_rows)
     df_flows = pd.DataFrame(flow_rows)
+
+    # Iteration History
     df_iters = pd.DataFrame(iter_rows)
+    
+    # Meta
     df_meta = pd.DataFrame(list((meta or {}).items()), columns=["key", "value"])
     
     # Detailed Iterations
     df_detailed = pd.DataFrame(detailed_iter_rows) if detailed_iter_rows else pd.DataFrame()
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df_regions.to_excel(writer, sheet_name="regions", index=False)
-        df_flows.to_excel(writer, sheet_name="flows", index=False)
-        df_iters.to_excel(writer, sheet_name="iters", index=False)
-        if not df_detailed.empty:
-            df_detailed.to_excel(writer, sheet_name="detailed_iters", index=False)
-        df_meta.to_excel(writer, sheet_name="meta", index=False)
+    # --- 2. Write with XlsxWriter Engine ---
+    # This avoids the double-save (pandas write -> openpyxl load -> save) pattern
+    
+    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        
+        # Define formats
+        header_fmt = workbook.add_format({'bold': True, 'text_wrap': False, 'valign': 'top', 'border': 1})
+        # number_fmt = workbook.add_format({'num_format': '#,##0.00'}) # optional
 
-    wb = load_workbook(output_path)
-    for sheet in ["regions", "flows", "iters", "detailed_iters", "meta"]:
-        if sheet in wb.sheetnames:
-            _apply_sheet_formatting(wb[sheet])
-    wb.save(output_path)
+        def write_sheet(df: pd.DataFrame, sheet_name: str):
+            if df.empty:
+                return
+                
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            
+            # Apply header format and auto-width
+            for idx, col in enumerate(df.columns):
+                # Write header with format
+                worksheet.write(0, idx, col, header_fmt)
+                
+                # Estimate width
+                max_len = max(
+                    len(str(col)),
+                    df[col].astype(str).map(len).max() if not df.empty else 0
+                )
+                width = min(max(max_len + 2, 10), 30) # clamp between 10 and 30
+                worksheet.set_column(idx, idx, width)
+            
+            # Freeze top row
+            worksheet.freeze_panes(1, 0)
+            
+            # Add simple autofilter
+            (max_row, max_col) = df.shape
+            if max_row > 0:
+                worksheet.autofilter(0, 0, max_row, max_col - 1)
+
+        write_sheet(df_regions, "regions")
+        write_sheet(df_flows, "flows")
+        write_sheet(df_iters, "iters")
+        if not df_detailed.empty:
+            write_sheet(df_detailed, "detailed_iters")
+        write_sheet(df_meta, "meta")
+
+    # No need for manual save(), the context manager handles it.
+
 

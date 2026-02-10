@@ -323,7 +323,11 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
 
         pen_imp_quad = -gp.Number(0.5) * rho_imp[r] * Sum(j, tau_imp[r, j] * tau_imp[r, j])
         pen_exp_quad = -gp.Number(0.5) * rho_exp[r] * Sum(j, tau_exp[r, j] * tau_exp[r, j])
-        pen_q_quad = -gp.Number(0.5) * kappa_Q[r] * (Q_offer[r] * Q_offer[r])
+        
+        # Penalize unused capacity: (Q_offer - Sum(x_exports + x_domestic))^2
+        # Note: Sum(j, x[r, j]) includes domestic use if x[r, r] exists.
+        q_used = Sum(j, x[r, j])
+        pen_q_quad = -gp.Number(0.5) * kappa_Q[r] * ((Q_offer[r] - q_used) * (Q_offer[r] - q_used))
 
         pen_imp_lin = -rho_imp[r] * Sum(j, tau_imp[r, j])
         pen_exp_lin = -rho_exp[r] * Sum(j, tau_exp[r, j])
@@ -338,7 +342,7 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
 
         producer_term = Sum(
             j,
-            (lam[j] - c_man[r] - c_ship[r, j] - tau_imp[j, r]) * x[r, j],
+            (lam[j] - c_man[r] - c_ship[r, j] - tau_imp[j, r] - tau_exp[r, j]) * x[r, j],
         )
 
         cons_surplus = (
@@ -484,8 +488,10 @@ def apply_player_fixings(
                 tau_exp.up[exp, imp] = v
 
 
-def extract_state(ctx: ModelContext) -> Dict[str, Dict]:
+def extract_state(ctx: ModelContext, variables: List[str] | None = None) -> Dict[str, Dict]:
     def _maybe_var(name: str):
+        if variables is not None and name not in variables:
+             return {}
         v = ctx.vars.get(name)
         if v is None:
             return {}
@@ -494,11 +500,13 @@ def extract_state(ctx: ModelContext) -> Dict[str, Dict]:
 
     # Extract objective values from solved models
     obj_values = {}
-    for r, model in ctx.models.items():
-        try:
-            obj_values[r] = float(model.objective_value)
-        except (AttributeError, TypeError):
-            pass  # Model may not have been solved
+    # Only extract obj if requested or if variables is None (default behavior)
+    if variables is None or "obj" in variables:
+        for r, model in ctx.models.items():
+            try:
+                obj_values[r] = float(model.objective_value)
+            except (AttributeError, TypeError):
+                pass  # Model may not have been solved
 
     return {
         "Q_offer": _maybe_var("Q_offer"),

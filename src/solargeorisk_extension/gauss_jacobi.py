@@ -56,6 +56,7 @@ def solve_jacobi(
     player_order: List[str] | None = None,
     convergence_mode: str = "strategy",
     tol_obj: float = 1e-6,
+    use_staged_tolerances: bool = True,
 ) -> Tuple[Dict[str, Dict], List[Dict]]:
 
 
@@ -154,17 +155,24 @@ def solve_jacobi(
     # and adapt the player loop to use it.
     ctx = build_model(data, working_directory=working_directory)
 
-    solve_kwargs = {"solver": solver}
-    if solver_options:
-        solve_kwargs["solver_options"] = solver_options
-
     for it in range(1, iters + 1):
+        if use_staged_tolerances:
+            # Use staged tolerances: looser in early sweeps
+            current_solver_opts = get_staged_solver_options(it, solver, solver_options)
+        else:
+            current_solver_opts = solver_options
+
+        solve_kwargs = {"solver": solver}
+        if current_solver_opts:
+            solve_kwargs["solver_options"] = current_solver_opts
+
         sweep_start = time.perf_counter()
         # === JACOBI: Freeze profile at sweep start ===
-        theta_old_Q = deepcopy(theta_Q)
-        theta_old_ti = deepcopy(theta_tau_imp)
-        theta_old_te = deepcopy(theta_tau_exp)
-        theta_old_obj = deepcopy(theta_obj)
+        # Use shallow copy instead of deepcopy for speed (dicts of floats/tuples are fine)
+        theta_old_Q = theta_Q.copy()
+        theta_old_ti = theta_tau_imp.copy()
+        theta_old_te = theta_tau_exp.copy()
+        theta_old_obj = theta_obj.copy()
 
         # Storage for best responses
         theta_br_Q: Dict[str, float] = {}
@@ -192,13 +200,39 @@ def solve_jacobi(
 
                 solve_times.append(time.perf_counter() - t0)
 
-                state = extract_state(ctx)
-                last_state = state # Keep track of the last player's full state
-
-                Q_sol = state.get("Q_offer", {})
-                ti_sol = state.get("tau_imp", {})
-                te_sol = state.get("tau_exp", {})
-                obj_sol = state.get("obj", {})
+                # Only extract strategic variables and obj
+                state = extract_state(ctx, variables=["Q_offer", "tau_imp", "tau_exp", "obj"])
+                
+                # We do NOT update last_state here with partial state, 
+                # because last_state is expected to have everything for callbacks.
+                # However, for intermediate sweeps, maybe we don't need full state in callback
+                # if the user only looks at strategies? 
+                # The callback _iter_log in run_gs DOES look at lam, mu, etc.
+                # But extracting them 50x per sweep is slow.
+                # Compromise: In sequential, we might just pass the PARTIAL state to callback?
+                # Or we skip updating last_state until the end of sweep?
+                # Actually, last_state is used in iter_callback(..., last_state, ...) AFTER the loop.
+                # So we must have a full state at least once per sweep?
+                # But wait, the callback is called ONCE per sweep, passing 'last_state'.
+                # 'last_state' is just the state of the LAST player solved. 
+                # If we only extract strategic vars, 'last_state' will be incomplete (missing lam, x...)
+                # minimizing overhead: let's only extract full state for the LAST player in the loop?
+                
+                is_last_player = (p == solve_order[-1])
+                if is_last_player and iter_callback is not None:
+                     # Extract full state for callback purposes
+                     full_state = extract_state(ctx)
+                     last_state = full_state
+                     # Update our specific sol vars from full state
+                     Q_sol = full_state.get("Q_offer", {})
+                     ti_sol = full_state.get("tau_imp", {})
+                     te_sol = full_state.get("tau_exp", {})
+                     obj_sol = full_state.get("obj", {})
+                else:
+                     Q_sol = state.get("Q_offer", {})
+                     ti_sol = state.get("tau_imp", {})
+                     te_sol = state.get("tau_exp", {})
+                     obj_sol = state.get("obj", {})
 
                 # Store best response for Q_offer
                 if p in Q_sol:

@@ -404,6 +404,9 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
             "rho_exp": rho_exp,
             "w": w,
             "kappa_Q": kappa_Q,
+            "Q_offer_last": Q_offer_last,
+            "tau_imp_last": tau_imp_last,
+            "tau_exp_last": tau_exp_last,
         },
         vars={
             "Q_offer": Q_offer,
@@ -420,13 +423,6 @@ def build_model(data: ModelData, working_directory: str | None = None) -> ModelC
         equations=equations,
         models=models,
     )
-
-    # Attach last params to context for updates
-    setattr(ctx, "Q_offer_last", Q_offer_last)
-    setattr(ctx, "tau_imp_last", tau_imp_last)
-    setattr(ctx, "tau_exp_last", tau_exp_last)
-
-    return ctx
 
 def apply_player_fixings(
     ctx: ModelContext,

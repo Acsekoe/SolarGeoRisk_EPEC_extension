@@ -77,6 +77,31 @@ def solve_gs(
     if solver_options:
         solve_kwargs["solver_options"] = solver_options
 
+    def _update_prox_reference() -> None:
+        # Anchor proximal terms to the strategy point at the start of each sweep.
+        q_last = ctx.params.get("Q_offer_last")
+        ti_last = ctx.params.get("tau_imp_last")
+        te_last = ctx.params.get("tau_exp_last")
+        if q_last is None or ti_last is None or te_last is None:
+            return
+
+        for r in data.regions:
+            q_last[r] = float(theta_Q.get(r, float(data.Qcap[r])))
+
+        for imp in data.regions:
+            for exp in data.regions:
+                if imp == exp:
+                    ti_last[imp, exp] = 0.0
+                else:
+                    ti_last[imp, exp] = float(theta_tau_imp.get((imp, exp), 0.0))
+
+        for exp in data.regions:
+            for imp in data.regions:
+                if exp == imp:
+                    te_last[exp, imp] = 0.0
+                else:
+                    te_last[exp, imp] = float(theta_tau_exp.get((exp, imp), 0.0))
+
     for it in range(1, iters + 1):
         r_strat = 0.0
         
@@ -85,6 +110,7 @@ def solve_gs(
         prev_ti = dict(theta_tau_imp)
         prev_te = dict(theta_tau_exp)
         prev_obj = dict(theta_obj)
+        _update_prox_reference()
 
         for p in data.players:
             apply_player_fixings(ctx, data, theta_Q, theta_tau_imp, theta_tau_exp, player=p)

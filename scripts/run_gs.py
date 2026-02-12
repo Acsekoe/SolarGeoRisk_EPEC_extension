@@ -43,7 +43,7 @@ class RunConfig:
     opttol: float = 1e-4
     
     method: str = "gauss_seidel"
-    iters: int = 1
+    iters: int = 100
     omega: float = 0.7
     tol_strat: float = 1e-2  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
     tol_obj: float = 1e-2

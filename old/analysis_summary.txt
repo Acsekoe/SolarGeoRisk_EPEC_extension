@@ -1,0 +1,58 @@
+Sensitivity Analysis Summary
+============================
+
+Overview
+--------
+- Total Runs: 20
+- Converged: 20 (100%)
+- Identified Equilibria: 2 distinct equilibria found.
+
+Most initial conditions converge to a "High Output" equilibrium. Only the `low_all` (very low starting values for all players) converges to a "Low Output" equilibrium.
+
+Comparison of Equilibria
+------------------------
+Feature               | High Output (Equilibrium 2)        | Low Output (Equilibrium 1)
+----------------------|------------------------------------|-----------------------------
+Status                | Dominant / Efficient               | Inefficient / Trap
+Occurrence            | 16 runs (80%)                      | 4 runs (20%)
+Basin of Attraction   | `high_all`, `mid_all`, `low_non_ch`| Only `low_all`
+China Output (Q_ch)   | 363.39 (39% util)                  | 317.44 (34% util)
+Diff in Q_ch          |                                    | -45.95 (-12.6%)
+APAC Output (Q_apac)  | 110.00 (100% util)                 | 108.17 (98% util)
+Market Prices (lam)   | Lower (e.g., EU approx 267)        | Higher (e.g., EU approx 297)
+
+Mechanism: Trade Diversion
+--------------------------
+The key difference lies in *who supplies whom*, specifically regarding APAC and ROW markets.
+
+1.  **High Output (Efficient Standard)**
+    - APAC is running at full capacity (100%) and **supplies its own domestic market** (18 units).
+    - China exports to **ROW** (27.5 units) and does **not** export to APAC.
+    - Efficiency: Domestic supply avoids transport costs, leading to lower prices and higher overall output.
+
+2.  **Low Output (Inefficient "Swap")**
+    - **China invades APAC**: China exports **17.03 units to APAC**, capturing the market.
+    - **APAC displaced**: Displaced from its home market, APAC shifts exports to **ROW** (19.27 units).
+    - **Inefficiency**: This "swap" involves cross-hauling (China -> APAC, APAC -> ROW) instead of direct supply (APAC -> APAC, China -> ROW).
+    - **Consequence**: The added transport interaction raises marginal costs/prices, reducing total demand, which explains why China's total output drops by ~46 units.
+
+Detailed Flow Changes (Export -> Import)
+----------------------------------------
+Route           | High Flow   | Low Flow    | Interpretation
+----------------|-------------|-------------|----------------------------
+apac -> apac    | 18.15       | 0.00        | APAC loses domestic market
+ch -> apac      | 0.00        | 17.03       | China invades APAC
+ch -> row       | 27.58       | 8.34        | China loses ROW share
+apac -> row     | 0.03        | 19.27       | APAC forced to export to ROW
+ch -> ch        | 277.74      | 259.50      | China domestic consumption drops
+
+Role of Player Order
+--------------------
+- **Initial Values Matter**: The "Low Output" trap was only triggered when ALL players started with very low values (`low_all`).
+- **Player Order Does Not Matter**: For any given set of initial values, the player update order (`default`, `ch_first`, `reverse`, etc.) had NO impact on the final equilibrium.
+
+Conclusion
+----------
+The "Low Output" equilibrium represents a coordination failure or local trap where trade patterns are sub-optimal.
+- Recommendation: Since 80% of scenarios (including mixed ones) find the High Output state, it is likely the robust solution.
+- Caution: If initializing with very low values (`low_all`), the solver gets stuck in the inefficient trade pattern.

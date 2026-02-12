@@ -1,0 +1,33 @@
+[CONFIG] Method: gauss_seidel
+[CONFIG] Solver: knitro  feastol=0.0001  opttol=0.0001
+[CONFIG] iters=1 omega=0.7 tol_rel=0.01 stable_iters=3
+[CONFIG] eps_x=0.001 eps_comp=0.0001
+[CONFIG] workdir=C:\Users\acsek\AppData\Local\Temp\solargeorisk_gams_20260212_125257_f9fb5d (auto-cleanup)
+[CONFIG] solver_options={'feastol': 0.0001, 'opttol': 0.0001}
+[CONFIG] Using init scenario: low_all
+[CONFIG] Custom initial Q_offer: {'ch': 186.20000000000002, 'eu': 0.0, 'us': 0.0, 'apac': 22.0, 'roa': 0.0, 'row': 0.0}
+[MAIN] Starting 1 sweeps with knitro (workers=1)
+[ITER 1] r_strat=12.6372 stable_count=0 sweep_time=31.66s
+[ITER 1] Q_offer, lam, and max wedges by region:
+  ch    Q_offer=364.6669 lam=176.9637 mx_ti=0.0000   mx_te=126.3716
+  eu    Q_offer=0.0000   lam=303.4970 mx_ti=0.0000   mx_te=0.0505  
+  us    Q_offer=0.0000   lam=290.8250 mx_ti=0.0000   mx_te=0.0634  
+  apac  Q_offer=67.2189  lam=246.8607 mx_ti=0.0000   mx_te=0.5827  
+  roa   Q_offer=0.0000   lam=312.9144 mx_ti=0.0000   mx_te=0.0150  
+  row   Q_offer=0.0000   lam=304.1798 mx_ti=0.0000   mx_te=0.0071  
+
+[TIMING] Total solve time: 31.66s
+[TIMING] Mean sweep time: 31.66s  (n=1)
+[FINAL] Q_offer, lam, and max wedges by region:
+  ch    Q_offer=364.6669 lam=176.9637 mx_ti=0.0000   mx_te=126.3716
+  eu    Q_offer=0.0000   lam=303.4970 mx_ti=0.0000   mx_te=0.0505  
+  us    Q_offer=0.0000   lam=290.8250 mx_ti=0.0000   mx_te=0.0634  
+  apac  Q_offer=67.2189  lam=246.8607 mx_ti=0.0000   mx_te=0.5827  
+  roa   Q_offer=0.0000   lam=312.9144 mx_ti=0.0000   mx_te=0.0150  
+  row   Q_offer=0.0000   lam=304.1798 mx_ti=0.0000   mx_te=0.0071  
+[OK] wrote: C:\EEG\EPEC\EPEC_VS_code\SolarGeoRisk_EPEC_extension\outputs\results_20260212_125257_f9fb5d.xlsx
+Running automatic LaTeX documentation generation...
+LaTeX source written to C:\EEG\EPEC\EPEC_VS_code\SolarGeoRisk_EPEC_extension\outputs\model_equations.tex
+LaTeX source written to C:\EEG\EPEC\EPEC_VS_code\SolarGeoRisk_EPEC_extension\overleaf\model_equations.tex
+[WARN] Git auto-push failed: [WinError 2] The system cannot find the file specified
+[CLEANUP] Deleted workdir: C:\Users\acsek\AppData\Local\Temp\solargeorisk_gams_20260212_125257_f9fb5d

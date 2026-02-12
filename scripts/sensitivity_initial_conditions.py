@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from solargeorisk_extension.model import ModelData
 from solargeorisk_extension.data_prep import load_data_from_excel
-from solargeorisk_extension.gauss_jacobi import solve_jacobi
+from solargeorisk_extension.gauss_seidel import solve_gs
 from solargeorisk_extension.results_writer import write_results_excel
 from solargeorisk_extension.plot_results import write_default_plots
 
@@ -70,17 +70,19 @@ def get_order_scenarios(players: List[str]) -> Dict[str, List[str]]:
     has_ch = 'ch' in players
     
     scenarios = {
-        "default": base,
+        "default": base, # typically ch is first
     }
     
-    if has_ch:
-        # China First: Remove 'ch' and prepend
-        ch_first = ['ch'] + [p for p in base if p != 'ch']
-        scenarios["ch_first"] = ch_first
-        
+    if has_ch and len(base) > 2:
         # China Last: Remove 'ch' and append
         ch_last = [p for p in base if p != 'ch'] + ['ch']
         scenarios["ch_last"] = ch_last
+        
+        # China Middle: Remove 'ch' and insert in middle
+        others = [p for p in base if p != 'ch']
+        mid_idx = len(others) // 2
+        ch_mid = others[:mid_idx] + ['ch'] + others[mid_idx:]
+        scenarios["ch_mid"] = ch_mid
     
     # Reverse order as a standard check
     scenarios["reverse"] = base[::-1]
@@ -174,26 +176,32 @@ def run_sensitivity_batch():
         
         start_time = time.perf_counter()
         
+        # Define callback for progress display
+        def _iter_progress(it, state, r_strat, stable_count):
+            # Extract Q and lam for display
+            q_map = state.get("Q_offer", {})
+            lam_map = state.get("lam", {})
+            
+            # Format succinct string: "ch: Q=... lam=... | eu: ..."
+            # Just show first few or all if few enough? 6 regions fits in one line if concise.
+            # "ch(350, 120) eu(0, 300) ..."
+            details = []
+            for r in data.players: # Use current data.players order which is what we need
+                 q = float(q_map.get(r, 0.0))
+                 l = float(lam_map.get(r, 0.0))
+                 details.append(f"{r}({q:.0f},{l:.0f})")
+            
+            info_str = " ".join(details)
+            print(f"    [It {it}] r={r_strat:.4f} s={stable_count} | {info_str}      ", end="\r")
+
         # Run Solver 
         try:
-            if WORKERS > 1:
-                 # Parallel solver (ignoring order!) - fallback if configured
-                 from solargeorisk_extension.gauss_jacobi import solve_jacobi_parallel
-                 state, iter_rows = solve_jacobi_parallel(
-                    data,
-                    excel_path=EXCEL_PATH,
-                    iters=ITERS,
-                    omega=OMEGA,
-                    tol_rel=TOL_REL,
-                    stable_iters=STABLE_ITERS,
-                    solver=SOLVER,
-                    initial_state=init_state,
-                    workers=WORKERS,
-                    working_directory=None,
-                 )
-            else:
-                 # Sequential solver (respecting order)
-                 state, iter_rows = solve_jacobi(
+            # Sequential solver (respecting order)
+            # Manually set player order in data object
+            original_players = list(data.players)
+            try:
+                data.players = list(order_list)
+                state, iter_rows = solve_gs(
                     data,
                     iters=ITERS,
                     omega=OMEGA,
@@ -201,10 +209,13 @@ def run_sensitivity_batch():
                     stable_iters=STABLE_ITERS,
                     solver=SOLVER,
                     initial_state=init_state,
-                    player_order=order_list,
                     working_directory=None, # Auto-temp dir
                     tol_obj=1e-2, # Added explicit tol_obj to match run_gs
+                    iter_callback=_iter_progress,
                 )
+                print() # Newline after progress bar
+            finally:
+                data.players = original_players
             
             elapsed = time.perf_counter() - start_time
             converged = (len(iter_rows) < ITERS)

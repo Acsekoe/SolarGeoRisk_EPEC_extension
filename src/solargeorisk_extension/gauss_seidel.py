@@ -16,6 +16,9 @@ def solve_gs(
     solver_options: Dict[str, float] | None = None,
     working_directory: str | None = None,
     iter_callback: Callable[[int, Dict[str, Dict], float, int], None] | None = None,
+    initial_state: Dict[str, Dict] | None = None,
+    convergence_mode: str = "strategy",
+    tol_obj: float = 1e-6,
 ) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
     if iters < 1:
         raise ValueError("iters must be >= 1")
@@ -28,9 +31,28 @@ def solve_gs(
 
     ctx = build_model(data, working_directory=working_directory)
 
-    theta_Q: Dict[str, float] = {r: 0.8 * float(data.Qcap[r]) for r in data.players}
-    theta_tau_imp: Dict[Tuple[str, str], float] = {(imp, exp): 0.0 for imp in data.regions for exp in data.regions}
-    theta_tau_exp: Dict[Tuple[str, str], float] = {(exp, imp): 0.0 for exp in data.regions for imp in data.regions}
+    # Initialize theta (strategies)
+    if initial_state:
+        theta_Q: Dict[str, float] = {
+            r: float(initial_state.get("Q_offer", {}).get(r, 0.8 * float(data.Qcap[r])))
+            for r in data.players
+        }
+        theta_tau_imp: Dict[Tuple[str, str], float] = {
+            (imp, exp): float(initial_state.get("tau_imp", {}).get((imp, exp), 0.0))
+            for imp in data.regions for exp in data.regions
+        }
+        theta_tau_exp: Dict[Tuple[str, str], float] = {
+            (exp, imp): float(initial_state.get("tau_exp", {}).get((exp, imp), 0.0))
+            for exp in data.regions for imp in data.regions
+        }
+        theta_obj: Dict[str, float] = {
+            r: float(initial_state.get("obj", {}).get(r, 0.0)) for r in data.players
+        }
+    else:
+        theta_Q: Dict[str, float] = {r: 0.8 * float(data.Qcap[r]) for r in data.players}
+        theta_tau_imp: Dict[Tuple[str, str], float] = {(imp, exp): 0.0 for imp in data.regions for exp in data.regions}
+        theta_tau_exp: Dict[Tuple[str, str], float] = {(exp, imp): 0.0 for exp in data.regions for imp in data.regions}
+        theta_obj: Dict[str, float] = {r: 0.0 for r in data.players}
 
     def _rel_change(new: float, old: float, scale: float) -> float:
         return abs(new - old) / max(abs(old), scale)
@@ -57,10 +79,12 @@ def solve_gs(
 
     for it in range(1, iters + 1):
         r_strat = 0.0
-
+        
+        # Snapshot for convergence check
         prev_Q = dict(theta_Q)
         prev_ti = dict(theta_tau_imp)
         prev_te = dict(theta_tau_exp)
+        prev_obj = dict(theta_obj)
 
         for p in data.players:
             apply_player_fixings(ctx, data, theta_Q, theta_tau_imp, theta_tau_exp, player=p)
@@ -72,8 +96,10 @@ def solve_gs(
             Q_sol = state.get("Q_offer", {})
             ti_sol = state.get("tau_imp", {})
             te_sol = state.get("tau_exp", {})
+            obj_sol = state.get("obj", {})
 
-            if p in theta_Q and p in Q_sol:
+            # Update strategies immediately (Gauss-Seidel)
+            if p in Q_sol:
                 br = float(Q_sol[p])
                 theta_Q[p] = (1.0 - omega) * theta_Q[p] + omega * br
 
@@ -81,7 +107,7 @@ def solve_gs(
                 key = (p, exp)
                 if p == exp:
                     continue
-                if key in theta_tau_imp and key in ti_sol:
+                if key in ti_sol:
                     br = float(ti_sol[key])
                     theta_tau_imp[key] = (1.0 - omega) * theta_tau_imp[key] + omega * br
 
@@ -89,10 +115,17 @@ def solve_gs(
                 key = (p, imp)
                 if p == imp:
                     continue
-                if key in theta_tau_exp and key in te_sol:
+                if key in te_sol:
                     br = float(te_sol[key])
                     theta_tau_exp[key] = (1.0 - omega) * theta_tau_exp[key] + omega * br
+            
+            # Update objective (no damping usually, just current value)
+            if isinstance(obj_sol, dict):
+                theta_obj[p] = float(obj_sol.get(p, 0.0))
+            else:
+                theta_obj[p] = float(obj_sol)
 
+        # Compute convergence metrics
         for r in data.players:
             r_strat = max(r_strat, _rel_change(theta_Q[r], prev_Q[r], _q_scale(r)))
         for imp in data.regions:
@@ -108,8 +141,27 @@ def solve_gs(
                 key = (exp, imp)
                 r_strat = max(r_strat, _rel_change(theta_tau_exp[key], prev_te[key], _te_scale(exp, imp)))
 
-        stable_count = stable_count + 1 if r_strat <= tol_rel else 0
-        iter_rows.append({"iter": it, "r_strat": float(r_strat), "stable_count": int(stable_count), "omega": float(omega)})
+        # Compute r_obj
+        r_obj = 0.0
+        for r in data.players:
+             r_obj = max(r_obj, _rel_change(theta_obj.get(r, 0.0), prev_obj.get(r, 0.0), 1000.0))
+
+        metric_met = False
+        if convergence_mode == "combined":
+             metric_met = (r_strat <= tol_rel) and (r_obj <= tol_obj)
+        elif convergence_mode == "objective":
+             metric_met = r_obj <= tol_obj
+        else: # "strategy"
+             metric_met = r_strat <= tol_rel
+
+        stable_count = stable_count + 1 if metric_met else 0
+        iter_rows.append({
+            "iter": it, 
+            "r_strat": float(r_strat), 
+            "r_obj": float(r_obj),
+            "stable_count": int(stable_count), 
+            "omega": float(omega)
+        })
 
         if iter_callback is not None:
             iter_callback(it, last_state, float(r_strat), int(stable_count))

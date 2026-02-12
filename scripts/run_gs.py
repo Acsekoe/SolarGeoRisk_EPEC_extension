@@ -22,7 +22,6 @@ else:
     os.environ["PYTHONPATH"] = src_path
 
 from solargeorisk_extension.data_prep import load_data_from_excel
-from solargeorisk_extension.gauss_jacobi import solve_jacobi, solve_jacobi_parallel
 from solargeorisk_extension.gauss_seidel import solve_gs
 from solargeorisk_extension.plot_results import write_default_plots
 from solargeorisk_extension.results_writer import write_results_excel
@@ -43,8 +42,8 @@ class RunConfig:
     feastol: float = 1e-4
     opttol: float = 1e-4
     
-    method: str = "jacobi"
-    iters: int = 100
+    method: str = "gauss_seidel"
+    iters: int = 1
     omega: float = 0.7
     tol_strat: float = 1e-2  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
     tol_obj: float = 1e-2
@@ -278,12 +277,14 @@ if __name__ == "__main__":
         data.settings["rho_prox"] = float(cfg.rho_prox)
     data.settings["use_quad"] = cfg.use_quad
 
+    # DEBUG: Print rho_exp
+    print(f"[DEBUG] rho_exp (first 3): {list(data.rho_exp.items())[:3]}")
+
     print(f"[CONFIG] Method: {method}")
     print(f"[CONFIG] Solver: {solver}  feastol={feastol:g}  opttol={opttol:g}")
     print(f"[CONFIG] iters={iters} omega={omega:g} tol_rel={tol_rel:g} stable_iters={stable_iters}")
     print(f"[CONFIG] eps_x={float(data.eps_x):g} eps_comp={float(data.eps_comp):g}")
-    if method == "jacobi" and workers > 1:
-        print(f"[CONFIG] workers={workers} (parallel Jacobi)")
+
     print(f"[CONFIG] workdir={workdir}{' (keep)' if keep_workdir else ' (auto-cleanup)'}")
 
     # Timing
@@ -354,7 +355,7 @@ if __name__ == "__main__":
         timing_state["sweep_start"] = time.perf_counter()
 
     # Select solver function based on method and workers
-    use_parallel = method == "jacobi" and workers > 1
+    use_parallel = False
     debug_workers = cfg.debug_workers
 
     # Override outlev for debug mode
@@ -412,106 +413,26 @@ if __name__ == "__main__":
         init_state = {"Q_offer": init_q, "tau_imp": {}, "tau_exp": {}}
         print(f"[CONFIG] Custom initial Q_offer: {init_q}")
 
-    # === Warmup phase (optional) ===
-    warmup_state = init_state  # Start warmup from custom init if provided
-    warmup_iter_rows = []
-    
-    # Resolve warmup settings
-    warmup_solver_arg = cfg.warmup_solver
-    
-    if warmup_solver_arg:
-        warmup_solver = warmup_solver_arg.strip()
-        warmup_iters = int(cfg.warmup_iters)
-        warmup_workers = int(cfg.warmup_workers)
-        print(f"[WARMUP] Starting {warmup_iters} sweeps with {warmup_solver} (workers={warmup_workers})")
-        
-        warmup_opts = _solver_options(
-            solver=warmup_solver,
-            feastol=feastol,
-            opttol=opttol,
-            cfg=cfg,
-        )
-        print(f"[WARMUP] solver_options={warmup_opts}")
-        
-        if warmup_workers > 1:
-            warmup_state, warmup_iter_rows = solve_jacobi_parallel(
-                data,
-                excel_path=cfg.input_file, # Use corrected input path?
-                iters=warmup_iters,
-                omega=omega,
-                tol_rel=cfg.tol_strat,
-                tol_obj=cfg.tol_obj,
-                stable_iters=stable_iters,
-                solver=warmup_solver,
-                solver_options=warmup_opts,
-                working_directory=workdir,
-                iter_callback=_iter_log,
-                workers=warmup_workers,
-                worker_timeout=cfg.worker_timeout,
-                convergence_mode=convergence_mode,
-            )
-        else:
-            warmup_state, warmup_iter_rows = solve_jacobi(
-                data,
-                iters=warmup_iters,
-                omega=omega,
-                tol_rel=cfg.tol_strat,
-                tol_obj=cfg.tol_obj,
-                stable_iters=stable_iters,
-                solver=warmup_solver,
-                solver_options=warmup_opts,
-                working_directory=workdir,
-                iter_callback=_iter_log,
-                convergence_mode=convergence_mode,
-            )
-        
-        # Apply warmup state to data for main phase
-        if warmup_state:
-            print(f"[WARMUP] Complete. Transferring state to main solver...")
-            # Update data with warmup state for warm start
-            data.warmup_state = warmup_state
-        
-        timing_state["sweep_start"] = time.perf_counter()
+    timing_state["sweep_start"] = time.perf_counter()
     
     # === Main phase ===
     print(f"[MAIN] Starting {iters} sweeps with {solver} (workers={workers})")
     try:
-        if workers > 1:
-            # parallel
-            state, iter_rows = solve_jacobi_parallel(
-                data,
-                excel_path="inputs/input_data.xlsx", # Use standard path or resolve?
-                iters=iters,
-                omega=omega,
-                tol_rel=cfg.tol_strat,
-                tol_obj=cfg.tol_obj,
-                stable_iters=stable_iters,
-                solver=solver,
-                solver_options=solver_opts,
-                working_directory=workdir,
-                iter_callback=_iter_log,
-                workers=workers,
-                worker_timeout=cfg.worker_timeout,
-                initial_state=warmup_state,
-                convergence_mode=convergence_mode,
-            )
-        else:
-            # sequential
-            solve_fn = solve_jacobi if cfg.method == "jacobi" else solve_gs
-            state, iter_rows = solve_fn(
-                data,
-                solver=solver,
-                solver_options=solver_opts,
-                iters=iters,
-                omega=omega,
-                tol_rel=cfg.tol_strat,
-                tol_obj=cfg.tol_obj,
-                stable_iters=stable_iters,
-                working_directory=workdir,
-                iter_callback=_iter_log,
-                initial_state=warmup_state,
-                convergence_mode=convergence_mode,
-            )
+        # sequential
+        state, iter_rows = solve_gs(
+            data,
+            solver=solver,
+            solver_options=solver_opts,
+            iters=iters,
+            omega=omega,
+            tol_rel=cfg.tol_strat,
+            tol_obj=cfg.tol_obj,
+            stable_iters=stable_iters,
+            working_directory=workdir,
+            iter_callback=_iter_log,
+            initial_state=init_state, # Use init_state directly as warmup removed
+            convergence_mode=convergence_mode,
+        )
     finally:
         total_elapsed = time.perf_counter() - total_start
         print(f"\n[TIMING] Total solve time: {total_elapsed:.2f}s")

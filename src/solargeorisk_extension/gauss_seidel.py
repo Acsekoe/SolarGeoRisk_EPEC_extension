@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Callable, Dict, List, Tuple
 
 from .model import ModelData, apply_player_fixings, build_model, extract_state
@@ -19,6 +20,7 @@ def solve_gs(
     initial_state: Dict[str, Dict] | None = None,
     convergence_mode: str = "strategy",
     tol_obj: float = 1e-6,
+    shuffle_players: bool = False,
 ) -> tuple[Dict[str, Dict], List[Dict[str, object]]]:
     if iters < 1:
         raise ValueError("iters must be >= 1")
@@ -54,20 +56,17 @@ def solve_gs(
         theta_tau_exp: Dict[Tuple[str, str], float] = {(exp, imp): 0.0 for exp in data.regions for imp in data.regions}
         theta_obj: Dict[str, float] = {r: 0.0 for r in data.players}
 
-    def _rel_change(new: float, old: float, scale: float) -> float:
-        return abs(new - old) / max(abs(old), scale)
+    def _scaled_change(new: float, old: float, scale: float) -> float:
+        return abs(new - old) / max(scale, 1e-12)
 
     def _q_scale(r: str) -> float:
-        qc = float(data.Qcap.get(r, 0.0))
-        return max(0.01 * qc, 1.0)
+        return max(float(data.Qcap.get(r, 0.0)), 1.0)
 
     def _ti_scale(imp: str, exp: str) -> float:
-        ub = float(data.tau_imp_ub[(imp, exp)])
-        return max(0.01 * ub, 1.0)
+        return max(float(data.tau_imp_ub[(imp, exp)]), 1e-3)
 
     def _te_scale(exp: str, imp: str) -> float:
-        ub = float(data.tau_exp_ub[(exp, imp)])
-        return max(0.01 * ub, 1.0)
+        return max(float(data.tau_exp_ub[(exp, imp)]), 1e-3)
 
     iter_rows: List[Dict[str, object]] = []
     stable_count = 0
@@ -110,9 +109,11 @@ def solve_gs(
         prev_ti = dict(theta_tau_imp)
         prev_te = dict(theta_tau_exp)
         prev_obj = dict(theta_obj)
-        _update_prox_reference()
-
-        for p in data.players:
+        sweep_order = list(data.players)
+        if shuffle_players:
+            random.shuffle(sweep_order)
+        for p in sweep_order:
+            _update_prox_reference()   # GS-consistent: anchor before each player
             apply_player_fixings(ctx, data, theta_Q, theta_tau_imp, theta_tau_exp, player=p)
             ctx.models[p].solve(**solve_kwargs)
 
@@ -153,24 +154,24 @@ def solve_gs(
 
         # Compute convergence metrics
         for r in data.players:
-            r_strat = max(r_strat, _rel_change(theta_Q[r], prev_Q[r], _q_scale(r)))
+            r_strat = max(r_strat, _scaled_change(theta_Q[r], prev_Q[r], _q_scale(r)))
         for imp in data.regions:
             for exp in data.regions:
                 if imp == exp:
                     continue
                 key = (imp, exp)
-                r_strat = max(r_strat, _rel_change(theta_tau_imp[key], prev_ti[key], _ti_scale(imp, exp)))
+                r_strat = max(r_strat, _scaled_change(theta_tau_imp[key], prev_ti[key], _ti_scale(imp, exp)))
         for exp in data.regions:
             for imp in data.regions:
                 if exp == imp:
                     continue
                 key = (exp, imp)
-                r_strat = max(r_strat, _rel_change(theta_tau_exp[key], prev_te[key], _te_scale(exp, imp)))
+                r_strat = max(r_strat, _scaled_change(theta_tau_exp[key], prev_te[key], _te_scale(exp, imp)))
 
         # Compute r_obj
         r_obj = 0.0
         for r in data.players:
-             r_obj = max(r_obj, _rel_change(theta_obj.get(r, 0.0), prev_obj.get(r, 0.0), 1000.0))
+             r_obj = max(r_obj, _scaled_change(theta_obj.get(r, 0.0), prev_obj.get(r, 0.0), 1000.0))
 
         metric_met = False
         if convergence_mode == "combined":
@@ -181,16 +182,22 @@ def solve_gs(
              metric_met = r_strat <= tol_rel
 
         stable_count = stable_count + 1 if metric_met else 0
-        iter_rows.append({
+        row_data: Dict[str, object] = {
             "iter": it, 
             "r_strat": float(r_strat), 
             "r_obj": float(r_obj),
             "stable_count": int(stable_count), 
-            "omega": float(omega)
-        })
+            "omega": float(omega),
+        }
+        if shuffle_players:
+            row_data["sweep_order"] = list(sweep_order)
+        iter_rows.append(row_data)
 
         if iter_callback is not None:
+            if shuffle_players:
+                last_state["_sweep_order"] = list(sweep_order)
             iter_callback(it, last_state, float(r_strat), int(stable_count))
+            last_state.pop("_sweep_order", None)
 
         if stable_count >= stable_iters:
             break

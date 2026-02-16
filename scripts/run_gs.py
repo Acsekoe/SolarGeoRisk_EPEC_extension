@@ -53,6 +53,7 @@ class RunConfig:
     workers: int = 1  # 1=sequential, >1=parallel
     worker_timeout: float = 120.0
     player_order: List[str] | None = None
+    shuffle_players: bool = True
     init_scenario: str | None = None
     warmup_solver: str | None = None
     warmup_iters: int = 5
@@ -69,7 +70,7 @@ class RunConfig:
 
     rho_imp: float | None = 0.05
     rho_exp: float | None = 0.05
-    kappa_q: float | None = 1
+    kappa_q: float | None = 0.0
     rho_prox: float | None = 0.05
     use_quad: bool = True
 
@@ -314,6 +315,9 @@ def run(cfg: RunConfig) -> str:
         sweep_elapsed = time.perf_counter() - timing_state["sweep_start"]
         sweep_times.append(sweep_elapsed)
         print(f"[ITER {it}] r_strat={r_strat:.6g} stable_count={stable_count} sweep_time={sweep_elapsed:.2f}s")
+        # Show shuffled player order if available
+        if "_sweep_order" in state:
+            print(f"[ITER {it}] player order: {state['_sweep_order']}")
         _print_state_summary(regions=list(data.regions), state=state, tag=f"ITER {it}")
         _append_detailed_iter_rows(
             data=data,
@@ -356,6 +360,7 @@ def run(cfg: RunConfig) -> str:
             iter_callback=_iter_log,
             initial_state=init_state,
             convergence_mode=convergence_mode,
+            shuffle_players=cfg.shuffle_players,
         )
     finally:
         total_elapsed = time.perf_counter() - total_start

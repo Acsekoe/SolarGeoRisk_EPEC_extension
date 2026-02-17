@@ -32,7 +32,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPTS_DIR)
 
 @dataclass(frozen=True)
 class RunConfig:
-    excel_path: str = os.path.join(PROJECT_ROOT, "inputs", "input_data.xlsx")
+    excel_path: str = os.path.join(PROJECT_ROOT, "inputs", "input_data_2024.xlsx")
     out_dir: str = os.path.join(PROJECT_ROOT, "outputs")
     plots_dir: str = os.path.join(PROJECT_ROOT, "plots")
 

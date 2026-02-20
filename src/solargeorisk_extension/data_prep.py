@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 
-from .model import ModelData
+from .model_single_year import ModelData
 
 
 def _require_columns(df: pd.DataFrame, cols: List[str], sheet: str) -> None:

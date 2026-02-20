@@ -74,9 +74,12 @@ class RunConfig:
     rho_prox: float | None = 0.05
     use_quad: bool = True
 
-    
+    # Model variant: "single_year" or "intertemporal"
+    model_type: str = "single_year"
+
     # Scenario name (e.g., "high_all", "low_all") to override init_q_offer
     scenario: str | None = "low_all"
+
 
 
 # Scenario definitions (fractions of Qcap)

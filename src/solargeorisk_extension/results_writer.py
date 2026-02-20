@@ -4,7 +4,7 @@ import os
 from typing import Dict, List, Any
 
 import pandas as pd
-from .model import ModelData
+from .model_single_year import ModelData
 
 
 def _safe_get(d: Dict, k, default=0.0) -> float:

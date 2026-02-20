@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from typing import Callable, Dict, List, Tuple
 
-from .model import ModelData, apply_player_fixings, build_model, extract_state
+from .model_single_year import ModelData, apply_player_fixings, build_model, extract_state
 
 
 def solve_gs(

@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from .model_single_year import ModelData
+from .model_intertemporal import ModelData as IntertemporalModelData
 
 
 def _require_columns(df: pd.DataFrame, cols: List[str], sheet: str) -> None:
@@ -104,7 +105,7 @@ def load_data_from_excel(path: str) -> ModelData:
     _require_columns(df_params, ["r", "Qcap_exist (GW)", "c_man (USD/kW)", "a_dem", "b_dem"], "params_region")
 
     d_col = next((c for c in ["D", "D (GW)"] if c in df_params.columns), None)
-    dmax_col = next((c for c in ["Dmax", "Dmax (GW)"] if c in df_params.columns), None)
+    dmax_col = next((c for c in ["Dmax", "Dmax (GW)", "Dmax_2025 (GW)", "Dmax_2025(GW)", "Dmax_2025"] if c in df_params.columns), None)
     if dmax_col is None and d_col is None:
         raise ValueError("Missing demand-cap column in sheet 'params_region'. Add 'Dmax' or legacy 'D'.")
 
@@ -160,18 +161,17 @@ def load_data_from_excel(path: str) -> ModelData:
 
         a_v = row["a_dem"]
         b_v = row["b_dem"]
-        if pd.isna(a_v):
-            raise ValueError(f"Column 'a_dem' has missing value for region '{r}'.")
-        if pd.isna(b_v):
-            raise ValueError(f"Column 'b_dem' has missing value for region '{r}'.")
-        a_f = float(a_v)
-        b_f = float(b_v)
-        if a_f <= 0.0:
+        # Allow NaN a_dem/b_dem for regions that are pure importers (no demand function).
+        # The model build() handles NaN via its compatibility fallback.
+        a_f = float(a_v) if not pd.isna(a_v) else float("nan")
+        b_f = float(b_v) if not pd.isna(b_v) else float("nan")
+        if not pd.isna(a_f) and a_f <= 0.0:
             raise ValueError(f"Column 'a_dem' must be > 0 for region '{r}'. Got: {a_f}")
-        if b_f <= 0.0:
+        if not pd.isna(b_f) and b_f <= 0.0:
             raise ValueError(f"Column 'b_dem' must be > 0 for region '{r}'. Got: {b_f}")
         a_dem[r] = a_f
         b_dem[r] = b_f
+
 
         c_v = row["c_man (USD/kW)"]
         if pd.isna(c_v):
@@ -337,3 +337,129 @@ def load_data_from_excel(path: str) -> ModelData:
         settings=settings,
     )
 
+
+# ---------------------------------------------------------------------------
+# Intertemporal data loader
+# ---------------------------------------------------------------------------
+_TIMES = ["2025", "2030", "2035", "2040"]
+
+# Map clean year label → possible column names in the Excel sheet
+_DMAX_COL_CANDIDATES = {
+    "2025": ["Dmax_2025 (GW)", "Dmax_2025(GW)", "Dmax_2025"],
+    "2030": ["Dmax_2030 (GW)", "Dmax_2030(GW)", "Dmax_2030"],
+    "2035": ["Dmax_2035 (GW)", "Dmax_2035(GW)", "Dmax_2035"],
+    "2040": ["Dmax_2040 (GW)", "Dmax_2040(GW)", "Dmax_2040"],
+}
+
+
+def _find_col(df: pd.DataFrame, candidates: List[str]) -> str | None:
+    """Return the first candidate column name that exists in df, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def load_data_intertemporal_from_excel(path: str) -> IntertemporalModelData:
+    """Load intertemporal ModelData from an Excel file.
+
+    The sheet layout is identical to the single-year format, with these
+    additional columns in *params_region*:
+
+      Dmax_2025 (GW), Dmax_2030 (GW), Dmax_2035 (GW), Dmax_2040 (GW)
+        – time-indexed demand caps (required; fallback to single Dmax if absent)
+
+      f_hold       – holding cost per GW per year (optional, default 0)
+      c_inv        – investment cost per GW per year (optional, default 0)
+      s_ub         – subsidy upper bound per GW (optional, default 0)
+      Kcap_2025    – initial capacity override (optional, fallback to Qcap_exist)
+    """
+
+    def _opt_float(row: "pd.Series", col: str, default: float) -> float:
+        """Read an optional float column from a pandas Series, returning default if missing/NaN."""
+        if col not in row.index:
+            return default
+        val = row[col]
+        try:
+            f = float(val)
+            return default if pd.isna(f) else f
+        except (TypeError, ValueError):
+            return default
+
+    # Reuse the single-year loader for the shared fields
+    sy_data = load_data_from_excel(path)
+
+    # Re-read params_region for the extra columns
+    df_params = pd.read_excel(path, sheet_name="params_region").copy()
+    df_params["r"] = df_params["r"].map(_norm_region)
+    df_params = df_params[df_params["r"].isin(sy_data.regions)]
+
+    row_map: Dict[str, pd.Series] = {}
+    for _, row in df_params.iterrows():
+        r = row["r"]
+        if r and r not in row_map:
+            row_map[r] = row
+
+    regions = sy_data.regions
+
+    # --- Time-indexed Dmax ---
+    Dmax_t: Dict[Tuple[str, str], float] = {}
+    for tp in _TIMES:
+        col = _find_col(df_params, _DMAX_COL_CANDIDATES[tp])
+        for r in regions:
+            if col is not None:
+                raw = row_map[r].get(col, float("nan"))
+                val = float(raw) if not pd.isna(raw) else float(sy_data.Dmax[r])
+            else:
+                val = float(sy_data.Dmax[r])
+            if val <= 0.0:
+                raise ValueError(
+                    f"Dmax_t for region '{r}', year '{tp}' must be > 0. Got: {val}"
+                )
+            Dmax_t[(r, tp)] = val
+
+    # --- Optional per-region capacity-cost columns ---
+    f_hold: Dict[str, float] = {}
+    c_inv: Dict[str, float] = {}
+    s_ub: Dict[str, float] = {}
+    Kcap_2025: Dict[str, float] = {}
+
+    for r in regions:
+        row = row_map[r]
+        f_hold[r] = _opt_float(row, "f_hold", 0.0)
+        c_inv[r] = _opt_float(row, "c_inv", 0.0)
+        s_ub[r] = _opt_float(row, "s_ub", 0.0)
+        kcap_raw = _opt_float(row, "Kcap_2025", float("nan"))
+        if not pd.isna(kcap_raw):
+            Kcap_2025[r] = float(kcap_raw)
+        else:
+            Kcap_2025[r] = float(sy_data.Qcap[r])
+
+    # Assemble IntertemporalModelData from single-year base + new fields
+    return IntertemporalModelData(
+        regions=sy_data.regions,
+        players=sy_data.players,
+        non_strategic=sy_data.non_strategic,
+        D=sy_data.D,
+        a_dem=sy_data.a_dem,
+        b_dem=sy_data.b_dem,
+        Dmax=sy_data.Dmax,
+        Qcap=sy_data.Qcap,
+        c_man=sy_data.c_man,
+        c_ship=sy_data.c_ship,
+        tau_imp_ub=sy_data.tau_imp_ub,
+        tau_exp_ub=sy_data.tau_exp_ub,
+        rho_imp=sy_data.rho_imp,
+        rho_exp=sy_data.rho_exp,
+        w=sy_data.w,
+        eps_x=sy_data.eps_x,
+        eps_comp=sy_data.eps_comp,
+        kappa_Q=sy_data.kappa_Q,
+        settings=sy_data.settings,
+        times=list(_TIMES),
+        Dmax_t=Dmax_t,
+        Kcap_2025=Kcap_2025,
+        s_ub=s_ub,
+        f_hold=f_hold,
+        c_inv=c_inv,
+    )

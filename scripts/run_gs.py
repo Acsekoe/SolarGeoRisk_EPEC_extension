@@ -20,8 +20,8 @@ if "PYTHONPATH" in os.environ:
 else:
     os.environ["PYTHONPATH"] = src_path
 
-from solargeorisk_extension.data_prep import load_data_from_excel
-from solargeorisk_extension.gauss_seidel import solve_gs
+from solargeorisk_extension.data_prep import load_data_from_excel, load_data_intertemporal_from_excel
+from solargeorisk_extension.gauss_seidel import solve_gs, solve_gs_intertemporal
 from solargeorisk_extension.plot_results import write_default_plots
 from solargeorisk_extension.results_writer import write_results_excel
 
@@ -33,6 +33,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPTS_DIR)
 @dataclass(frozen=True)
 class RunConfig:
     excel_path: str = os.path.join(PROJECT_ROOT, "inputs", "input_data_2024.xlsx")
+    excel_path_intertemporal: str = os.path.join(PROJECT_ROOT, "inputs", "input_data_intertemporal.xlsx")
     out_dir: str = os.path.join(PROJECT_ROOT, "outputs")
     plots_dir: str = os.path.join(PROJECT_ROOT, "plots")
 
@@ -113,6 +114,7 @@ def _safe_float(v: object, default: float = 0.0) -> float:
         return float(default)
 
 
+
 def _print_state_summary(*, regions: list[str], state: dict[str, dict], tag: str = "SUMMARY") -> None:
     q_offer = state.get("Q_offer", {}) or {}
     lam = state.get("lam", {}) or {}
@@ -121,20 +123,37 @@ def _print_state_summary(*, regions: list[str], state: dict[str, dict], tag: str
         print(f"[{tag}] No regions configured; skipping Q_offer/lam print.")
         return
 
-    print(f"[{tag}] Q_offer, lam, and max wedges by region:")
-    for r in regions:
-        q_val = _safe_float(q_offer.get(r))
-        l_val = _safe_float(lam.get(r))
-        
-        # Calculate max wedges set BY this region
-        # tau_imp[r, j]: r is importer, sets tariff on j
-        t_i_vals = [state.get("tau_imp", {}).get((r, j), 0.0) for j in regions if j != r]
-        max_ti = max(t_i_vals) if t_i_vals else 0.0
-        
-        # tau_exp[r, j]: r is exporter, sets tax on j
-        t_e_vals = [state.get("tau_exp", {}).get((r, j), 0.0) for j in regions if j != r]
-        max_te = max(t_e_vals) if t_e_vals else 0.0
+    # Support both single-key {r: val} and time-indexed {(r,t): val} state dicts
+    def _val_for_region(d: dict, r: str) -> float:
+        """Get scalar value for region r; if keyed by (r,t) tuples, sum across t."""
+        if r in d:
+            return _safe_float(d[r])
+        vals = [v for (k0, *_), v in [(k if isinstance(k, tuple) else (k,), v) for k, v in d.items()] if k0 == r]
+        return sum(vals) if vals else 0.0
 
+    def _max_wedge(d: dict, r: str, regions: list) -> float:
+        """Max tariff/tax set by r. Handles both (r,j) and (r,j,t) keys."""
+        vals = []
+        for j in regions:
+            if j == r:
+                continue
+            # try single-year key (r, j)
+            v = d.get((r, j))
+            if v is not None:
+                vals.append(_safe_float(v))
+            else:
+                # time-indexed keys (r, j, t)
+                for k, w in d.items():
+                    if isinstance(k, tuple) and len(k) == 3 and k[0] == r and k[1] == j:
+                        vals.append(_safe_float(w))
+        return max(vals) if vals else 0.0
+
+    print(f"[{tag}] Q_offer (sum over t), lam (sum over t), and max wedges by region:")
+    for r in regions:
+        q_val = _val_for_region(q_offer, r)
+        l_val = _val_for_region(lam, r)
+        max_ti = _max_wedge(state.get("tau_imp", {}), r, regions)
+        max_te = _max_wedge(state.get("tau_exp", {}), r, regions)
         print(f"  {r:<5} Q_offer={q_val:<8.4f} lam={l_val:<8.4f} mx_ti={max_ti:<8.4f} mx_te={max_te:<8.4f}")
 
 
@@ -277,7 +296,12 @@ def run(cfg: RunConfig) -> str:
     if method != "gauss_seidel":
         raise ValueError(f"Unsupported method '{cfg.method}'. Supported: 'gauss_seidel'.")
 
-    excel_path = _resolve_excel_path(cfg.excel_path, cfg.excel_path)
+    is_intertemporal = cfg.model_type.strip().lower() == "intertemporal"
+
+    if is_intertemporal:
+        excel_path = _resolve_excel_path(cfg.excel_path_intertemporal, cfg.excel_path_intertemporal)
+    else:
+        excel_path = _resolve_excel_path(cfg.excel_path, cfg.excel_path)
     out_dir = cfg.out_dir
     plots_dir = cfg.plots_dir
 
@@ -297,10 +321,14 @@ def run(cfg: RunConfig) -> str:
     output_path = os.path.join(out_dir, f"results_{run_id}.xlsx")
     workdir = _gams_workdir(run_id, cfg.workdir)
 
-    data = load_data_from_excel(excel_path)
+    if is_intertemporal:
+        data = load_data_intertemporal_from_excel(excel_path)
+    else:
+        data = load_data_from_excel(excel_path)
     _apply_data_overrides(data, cfg)
 
     print(f"[DEBUG] rho_exp (first 3): {list(data.rho_exp.items())[:3]}")
+    print(f"[CONFIG] Model type: {cfg.model_type}")
     print(f"[CONFIG] Method: {method}")
     print(f"[CONFIG] Solver: {solver}  feastol={feastol:g}  opttol={opttol:g}")
     print(f"[CONFIG] iters={iters} omega={omega:g} tol_rel={tol_rel:g} stable_iters={stable_iters}")
@@ -350,21 +378,38 @@ def run(cfg: RunConfig) -> str:
     print(f"[MAIN] Starting {iters} sweeps with {solver}")
 
     try:
-        state, iter_rows = solve_gs(
-            data,
-            solver=solver,
-            solver_options=solver_opts,
-            iters=iters,
-            omega=omega,
-            tol_rel=cfg.tol_strat,
-            tol_obj=cfg.tol_obj,
-            stable_iters=stable_iters,
-            working_directory=workdir,
-            iter_callback=_iter_log,
-            initial_state=init_state,
-            convergence_mode=convergence_mode,
-            shuffle_players=cfg.shuffle_players,
-        )
+        if is_intertemporal:
+            state, iter_rows = solve_gs_intertemporal(
+                data,
+                solver=solver,
+                solver_options=solver_opts,
+                iters=iters,
+                omega=omega,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
+                stable_iters=stable_iters,
+                working_directory=workdir,
+                iter_callback=_iter_log,
+                initial_state=init_state,
+                convergence_mode=convergence_mode,
+                shuffle_players=cfg.shuffle_players,
+            )
+        else:
+            state, iter_rows = solve_gs(
+                data,
+                solver=solver,
+                solver_options=solver_opts,
+                iters=iters,
+                omega=omega,
+                tol_rel=cfg.tol_strat,
+                tol_obj=cfg.tol_obj,
+                stable_iters=stable_iters,
+                working_directory=workdir,
+                iter_callback=_iter_log,
+                initial_state=init_state,
+                convergence_mode=convergence_mode,
+                shuffle_players=cfg.shuffle_players,
+            )
     finally:
         total_elapsed = time.perf_counter() - total_start
         print(f"\n[TIMING] Total solve time: {total_elapsed:.2f}s")

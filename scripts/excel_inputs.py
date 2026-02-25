@@ -157,7 +157,9 @@ def create_scenario_file(year, filename):
             "w": 1, "k_shed_mult": 1,
             "a_dem": proj["a_dem"][r],
             "b_dem": proj["b_dem"][r],
-            "kappa_Q": 0.0001
+            "kappa_Q": 0.0001,
+            "f_hold": 1.0,  # USD/kW/year holding cost
+            "c_inv": proj["c_man"][r] * 0.5  # Assume capital investment is 50% of manufacturing cost
         }
         params_data.append(row)
     df_params = pd.DataFrame(params_data)

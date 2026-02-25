@@ -37,12 +37,12 @@ class RunConfig:
     out_dir: str = os.path.join(PROJECT_ROOT, "outputs")
     plots_dir: str = os.path.join(PROJECT_ROOT, "plots")
 
-    solver: str = "knitro"
+    solver: str = "ipopt"
     feastol: float = 1e-4
     opttol: float = 1e-4
     
     method: str = "gauss_seidel"
-    iters: int = 100
+    iters: int = 2
     omega: float = 0.7
     tol_strat: float = 1e-2  # Renamed from tol_rel for clarity, but tol_rel CLI arg maps here
     tol_obj: float = 1e-2
@@ -71,15 +71,15 @@ class RunConfig:
 
     rho_imp: float | None = 0.05
     rho_exp: float | None = 0.05
-    kappa_q: float | None = 0.0
-    rho_prox: float | None = 0.05
+    kappa_q: float | None = 0.005
+    rho_prox: float | None = 0.005
     use_quad: bool = True
 
     # Model variant: "single_year" or "intertemporal"
-    model_type: str = "single_year"
+    model_type: str = "intertemporal"
 
     # Scenario name (e.g., "high_all", "low_all") to override init_q_offer
-    scenario: str | None = "low_all"
+    scenario: str | None = "mid_all"
 
 
 
@@ -123,38 +123,55 @@ def _print_state_summary(*, regions: list[str], state: dict[str, dict], tag: str
         print(f"[{tag}] No regions configured; skipping Q_offer/lam print.")
         return
 
-    # Support both single-key {r: val} and time-indexed {(r,t): val} state dicts
-    def _val_for_region(d: dict, r: str) -> float:
-        """Get scalar value for region r; if keyed by (r,t) tuples, sum across t."""
-        if r in d:
-            return _safe_float(d[r])
-        vals = [v for (k0, *_), v in [(k if isinstance(k, tuple) else (k,), v) for k, v in d.items()] if k0 == r]
-        return sum(vals) if vals else 0.0
+    # Check if this is an intertemporal run by looking at the keys of Q_offer
+    is_intertemporal = any(isinstance(k, tuple) and len(k) > 1 for k in q_offer.keys())
 
-    def _max_wedge(d: dict, r: str, regions: list) -> float:
-        """Max tariff/tax set by r. Handles both (r,j) and (r,j,t) keys."""
-        vals = []
-        for j in regions:
-            if j == r:
-                continue
-            # try single-year key (r, j)
-            v = d.get((r, j))
-            if v is not None:
-                vals.append(_safe_float(v))
-            else:
-                # time-indexed keys (r, j, t)
-                for k, w in d.items():
-                    if isinstance(k, tuple) and len(k) == 3 and k[0] == r and k[1] == j:
-                        vals.append(_safe_float(w))
-        return max(vals) if vals else 0.0
+    if is_intertemporal:
+        print(f"[{tag}] Q, Kcap, Icap, Dcap, s, lam, and max wedges by region and time:")
+        
+        # Collect all unique time periods from Q_offer keys
+        times = sorted(list(set(k[1] for k in q_offer.keys() if isinstance(k, tuple) and len(k) > 1)))
+        
+        for r in regions:
+            for t in times:
+                q_val = _safe_float(q_offer.get((r, t), 0.0))
+                k_val = _safe_float(state.get("Kcap", {}).get((r, t), 0.0))
+                i_val = _safe_float(state.get("Icap", {}).get((r, t), 0.0))
+                d_val = _safe_float(state.get("Dcap", {}).get((r, t), 0.0))
+                s_val = _safe_float(state.get("s", {}).get((r, t), 0.0))
+                l_val = _safe_float(lam.get((r, t), 0.0))
+                
+                # Find max tau_imp and tau_exp for this region and time
+                max_ti = max([_safe_float(v) for k, v in state.get("tau_imp", {}).items() 
+                              if isinstance(k, tuple) and len(k) == 3 and k[0] == r and k[2] == t], default=0.0)
+                max_te = max([_safe_float(v) for k, v in state.get("tau_exp", {}).items() 
+                              if isinstance(k, tuple) and len(k) == 3 and k[0] == r and k[2] == t], default=0.0)
+                
+                print(f"  {r:<4} {t:<4} Q={q_val:<8.2f} K={k_val:<8.2f} I={i_val:<7.2f} D={d_val:<7.2f} s={s_val:<6.2f} lam={l_val:<6.2f} ti={max_ti:<6.2f} te={max_te:<6.2f}")
+    else:
+        # Support single-key {r: val} state dicts (single year)
+        def _val_for_region(d: dict, r: str) -> float:
+            if r in d:
+                return _safe_float(d[r])
+            return 0.0
 
-    print(f"[{tag}] Q_offer (sum over t), lam (sum over t), and max wedges by region:")
-    for r in regions:
-        q_val = _val_for_region(q_offer, r)
-        l_val = _val_for_region(lam, r)
-        max_ti = _max_wedge(state.get("tau_imp", {}), r, regions)
-        max_te = _max_wedge(state.get("tau_exp", {}), r, regions)
-        print(f"  {r:<5} Q_offer={q_val:<8.4f} lam={l_val:<8.4f} mx_ti={max_ti:<8.4f} mx_te={max_te:<8.4f}")
+        def _max_wedge(d: dict, r: str, regions: list) -> float:
+            vals = []
+            for j in regions:
+                if j == r:
+                    continue
+                v = d.get((r, j))
+                if v is not None:
+                    vals.append(_safe_float(v))
+            return max(vals) if vals else 0.0
+
+        print(f"[{tag}] Q_offer, lam, and max wedges by region:")
+        for r in regions:
+            q_val = _val_for_region(q_offer, r)
+            l_val = _val_for_region(lam, r)
+            max_ti = _max_wedge(state.get("tau_imp", {}), r, regions)
+            max_te = _max_wedge(state.get("tau_exp", {}), r, regions)
+            print(f"  {r:<5} Q_offer={q_val:<8.4f} lam={l_val:<8.4f} mx_ti={max_ti:<8.4f} mx_te={max_te:<8.4f}")
 
 
 def _gams_workdir(run_id: str, configured_workdir: str | None) -> str:
@@ -264,31 +281,74 @@ def _append_detailed_iter_rows(
     tau_exp_map = state.get("tau_exp", {})
     tau_imp_map = state.get("tau_imp", {})
 
-    for r in data.regions:
-        row: dict[str, object] = {
-            "iter": it,
-            "r": r,
-            "stable_count": stable_count,
-            "r_strat": r_strat,
-            "Q_offer": _safe_float(q_map.get(r)),
-            "lam": _safe_float(lam_map.get(r)),
-            "mu": _safe_float(mu_map.get(r)),
-            "beta_dem": _safe_float(beta_dem_map.get(r)),
-            "psi_dem": _safe_float(psi_dem_map.get(r)),
-            "obj": _safe_float(obj_map.get(r)) if r in data.players else 0.0,
-        }
+    # Check if intertemporal
+    is_intertemporal = any(isinstance(k, tuple) and len(k) > 1 for k in q_map.keys())
 
-        for dest in data.regions:
-            row[f"x_exp_to_{dest}"] = _safe_float(x_map.get((r, dest)))
-            row[f"gamma_exp_to_{dest}"] = _safe_float(gamma_map.get((r, dest)))
-            row[f"tau_exp_to_{dest}"] = _safe_float(tau_exp_map.get((r, dest)))
-
-        for src in data.regions:
-            row[f"x_imp_from_{src}"] = _safe_float(x_map.get((src, r)))
-            row[f"gamma_imp_from_{src}"] = _safe_float(gamma_map.get((src, r)))
-            row[f"tau_imp_from_{src}"] = _safe_float(tau_imp_map.get((r, src)))
-
-        rows.append(row)
+    if is_intertemporal:
+        times = sorted(list(set(k[1] for k in q_map.keys() if isinstance(k, tuple) and len(k) > 1)))
+        
+        kcap_map = state.get("Kcap", {})
+        icap_map = state.get("Icap", {})
+        dcap_map = state.get("Dcap", {})
+        s_map = state.get("s", {})
+        
+        for r in data.regions:
+            for t in times:
+                row: dict[str, object] = {
+                    "iter": it,
+                    "r": r,
+                    "t": t,
+                    "stable_count": stable_count,
+                    "r_strat": r_strat,
+                    "Q_offer": _safe_float(q_map.get((r, t))),
+                    "Kcap": _safe_float(kcap_map.get((r, t))),
+                    "Icap": _safe_float(icap_map.get((r, t))),
+                    "Dcap": _safe_float(dcap_map.get((r, t))),
+                    "s": _safe_float(s_map.get((r, t))),
+                    "lam": _safe_float(lam_map.get((r, t))),
+                    "mu": _safe_float(mu_map.get((r, t))),
+                    "beta_dem": _safe_float(beta_dem_map.get((r, t))),
+                    "psi_dem": _safe_float(psi_dem_map.get((r, t))),
+                    "obj": _safe_float(obj_map.get(r)) if r in data.players else 0.0,
+                }
+        
+                for dest in data.regions:
+                    row[f"x_exp_to_{dest}"] = _safe_float(x_map.get((r, dest, t)))
+                    row[f"gamma_exp_to_{dest}"] = _safe_float(gamma_map.get((r, dest, t)))
+                    row[f"tau_exp_to_{dest}"] = _safe_float(tau_exp_map.get((r, dest, t)))
+        
+                for src in data.regions:
+                    row[f"x_imp_from_{src}"] = _safe_float(x_map.get((src, r, t)))
+                    row[f"gamma_imp_from_{src}"] = _safe_float(gamma_map.get((src, r, t)))
+                    row[f"tau_imp_from_{src}"] = _safe_float(tau_imp_map.get((r, src, t)))
+        
+                rows.append(row)
+    else:
+        for r in data.regions:
+            row: dict[str, object] = {
+                "iter": it,
+                "r": r,
+                "stable_count": stable_count,
+                "r_strat": r_strat,
+                "Q_offer": _safe_float(q_map.get(r)),
+                "lam": _safe_float(lam_map.get(r)),
+                "mu": _safe_float(mu_map.get(r)),
+                "beta_dem": _safe_float(beta_dem_map.get(r)),
+                "psi_dem": _safe_float(psi_dem_map.get(r)),
+                "obj": _safe_float(obj_map.get(r)) if r in data.players else 0.0,
+            }
+    
+            for dest in data.regions:
+                row[f"x_exp_to_{dest}"] = _safe_float(x_map.get((r, dest)))
+                row[f"gamma_exp_to_{dest}"] = _safe_float(gamma_map.get((r, dest)))
+                row[f"tau_exp_to_{dest}"] = _safe_float(tau_exp_map.get((r, dest)))
+    
+            for src in data.regions:
+                row[f"x_imp_from_{src}"] = _safe_float(x_map.get((src, r)))
+                row[f"gamma_imp_from_{src}"] = _safe_float(gamma_map.get((src, r)))
+                row[f"tau_imp_from_{src}"] = _safe_float(tau_imp_map.get((r, src)))
+    
+            rows.append(row)
 
 
 def run(cfg: RunConfig) -> str:

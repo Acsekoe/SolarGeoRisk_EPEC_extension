@@ -36,41 +36,95 @@ def write_results_excel(
 
     # --- 1. Prepare DataFrames ---
     
+    # Check if intertemporal
+    is_intertemporal = any(isinstance(k, tuple) and len(k) > 1 for k in Q_offer.keys())
+    
     # Regions Sheet
     region_rows: List[Dict[str, object]] = []
-    for r in data.regions:
-        imports = sum(_safe_get(x, (exp, r), 0.0) for exp in data.regions)
-        exports = sum(_safe_get(x, (r, imp), 0.0) for imp in data.regions)
-        region_rows.append(
-            {
-                "r": r,
-                "Q_offer": _safe_get(Q_offer, r, 0.0),
-                "x_dem": _safe_get(x_dem, r, 0.0),
-                "lam": _safe_get(lam, r, 0.0),
-                "obj": _safe_get(obj, r, 0.0),
-                "imports": float(imports),
-                "exports": float(exports),
-                "Qcap": float(data.Qcap[r]),
-                "Dmax": float(data.Dmax[r]),
-            }
-        )
+    
+    if is_intertemporal:
+        times = sorted(list(set(k[1] for k in Q_offer.keys() if isinstance(k, tuple) and len(k) > 1)))
+        
+        for r in data.regions:
+            for t in times:
+                imports = sum(_safe_get(x, (exp, r, t), 0.0) for exp in data.regions)
+                exports = sum(_safe_get(x, (r, imp, t), 0.0) for imp in data.regions)
+                
+                Kcap = state.get("Kcap", {})
+                Icap = state.get("Icap", {})
+                Dcap = state.get("Dcap", {})
+                s_var = state.get("s", {})
+                
+                region_rows.append(
+                    {
+                        "r": r,
+                        "t": t,
+                        "Q_offer": _safe_get(Q_offer, (r, t), 0.0),
+                        "Kcap": _safe_get(Kcap, (r, t), 0.0),
+                        "Icap": _safe_get(Icap, (r, t), 0.0),
+                        "Dcap": _safe_get(Dcap, (r, t), 0.0),
+                        "s": _safe_get(s_var, (r, t), 0.0),
+                        "x_dem": _safe_get(x_dem, (r, t), 0.0),
+                        "lam": _safe_get(lam, (r, t), 0.0),
+                        "obj": _safe_get(obj, r, 0.0), # Objective is scalar per region
+                        "imports": float(imports),
+                        "exports": float(exports),
+                        "Qcap_init": float(data.Qcap[r]),
+                    }
+                )
+    else:
+        for r in data.regions:
+            imports = sum(_safe_get(x, (exp, r), 0.0) for exp in data.regions)
+            exports = sum(_safe_get(x, (r, imp), 0.0) for imp in data.regions)
+            region_rows.append(
+                {
+                    "r": r,
+                    "Q_offer": _safe_get(Q_offer, r, 0.0),
+                    "x_dem": _safe_get(x_dem, r, 0.0),
+                    "lam": _safe_get(lam, r, 0.0),
+                    "obj": _safe_get(obj, r, 0.0),
+                    "imports": float(imports),
+                    "exports": float(exports),
+                    "Qcap": float(data.Qcap[r]),
+                    "Dmax": float(data.Dmax[r]),
+                }
+            )
+            
     df_regions = pd.DataFrame(region_rows)
 
     # Flows Sheet
     flow_rows: List[Dict[str, object]] = []
-    for exp in data.regions:
-        for imp in data.regions:
-            flow_rows.append(
-                {
-                    "exp": exp,
-                    "imp": imp,
-                    "x": _safe_get(x, (exp, imp), 0.0),
-                    "tau_imp": _safe_get(tau_imp, (imp, exp), 0.0),
-                    "tau_exp": _safe_get(tau_exp, (exp, imp), 0.0),
-                    "c_ship": float(data.c_ship[(exp, imp)]),
-                    "c_man": float(data.c_man[exp]),
-                }
-            )
+    
+    if is_intertemporal:
+        for exp in data.regions:
+            for imp in data.regions:
+                for t in times:
+                    flow_rows.append(
+                        {
+                            "exp": exp,
+                            "imp": imp,
+                            "t": t,
+                            "x": _safe_get(x, (exp, imp, t), 0.0),
+                            "tau_imp": _safe_get(tau_imp, (imp, exp, t), 0.0),
+                            "tau_exp": _safe_get(tau_exp, (exp, imp, t), 0.0),
+                            "c_ship": float(data.c_ship[(exp, imp)]),
+                            "c_man": float(data.c_man[exp]),
+                        }
+                    )
+    else:
+        for exp in data.regions:
+            for imp in data.regions:
+                flow_rows.append(
+                    {
+                        "exp": exp,
+                        "imp": imp,
+                        "x": _safe_get(x, (exp, imp), 0.0),
+                        "tau_imp": _safe_get(tau_imp, (imp, exp), 0.0),
+                        "tau_exp": _safe_get(tau_exp, (exp, imp), 0.0),
+                        "c_ship": float(data.c_ship[(exp, imp)]),
+                        "c_man": float(data.c_man[exp]),
+                    }
+                )
     df_flows = pd.DataFrame(flow_rows)
 
     # Iteration History

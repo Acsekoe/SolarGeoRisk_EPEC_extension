@@ -157,8 +157,6 @@ def load_data_from_excel(path: str) -> ModelData:
             d_f = dmax_f
         if d_f <= 0.0:
             raise ValueError(f"Column 'D' must be > 0 for region '{r}'. Got: {d_f}")
-        D[r] = d_f
-
         a_v = row["a_dem"]
         b_v = row["b_dem"]
         # Allow NaN a_dem/b_dem for regions that are pure importers (no demand function).
